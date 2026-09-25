@@ -86,3 +86,10 @@ End the creation response with one fenced, copyable command using the final path
 ```
 
 Quote the source when needed so the command can be pasted verbatim. Do not generate a longer resume prompt.
+
+### Carry the current decision
+
+Record the latest user-attributed endpoint, permitted actions, exclusions, and waived steps
+beside the continuation. Preserve valid completed evidence with its source identity. A later
+owner decision supersedes an earlier continuation clause; do not copy both as active orders.
+The record supplies context, not authority beyond the next user's request.

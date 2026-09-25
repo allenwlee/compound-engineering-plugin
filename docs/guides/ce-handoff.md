@@ -2,7 +2,7 @@
 
 > Save the useful context from one agent session so a fresh agent can pick up without the original transcript.
 
-`ce-handoff` runs in two directions. A bare invocation creates a handoff file. Resume intent finds or reads a continuity source you select, summarizes what it found, recommends a next step, and waits. It never starts `ce-plan`, `ce-work`, or any other workflow until you say so.
+`ce-handoff` runs in two directions. A bare invocation creates a handoff file. Resume reads a source you select and checks the recovered state. A request for orientation ends with a summary and recommendation; an explicit current request to continue proceeds within that authorization.
 
 The skill is prose-first. It uses whatever capabilities the active agent already has and adds no transport script, index database, or lifecycle machinery.
 
@@ -17,7 +17,7 @@ The skill is prose-first. It uses whatever capabilities the active agent already
 | What does bare `/ce-handoff` do? | Always creates a new handoff |
 | Where does it write? | Default: `/tmp/compound-engineering-<effective-uid>/ce-handoff/<repo-namespace>/<topic>.md`. Sandboxes that only allow `$TMPDIR` get the same layout there; the skill prints the path it used. An explicit path, format, or publish destination overrides the default. |
 | What do I paste into the next session? | `/ce-handoff resume <path-or-URL>` |
-| What happens after resume? | A summary, one recommended continuation, then a wait. Numbered choices appear only for real forks. |
+| What happens after resume? | Orientation ends with a recommendation. Explicit current continuation proceeds within its scope. |
 
 ---
 
@@ -81,11 +81,11 @@ One limit to know: automatic discovery only works when the next session sees the
 
 ## How resume protects you
 
-Resume stops twice, and both stops are yours.
+Discovery and orientation each follow the scope of your request.
 
 Discovery is metadata-only. `resume <keywords>` ranks candidates by frontmatter, filename, and file metadata, lists them with match reasons, and stops. No body is read until you pick one.
 
-Orientation stops before action. After reading your selection, the agent checks that referenced state still exists, summarizes what it recovered, recommends one continuation matched to the handoff's reason, and waits. Selecting a file authorized reading that file, nothing else. An old instruction in a handoff does not become current authority.
+Selecting a file alone authorizes reading it. After checking the recovered state, an orientation-only request stops before action. If your current request also authorizes continuation, the agent proceeds within that scope, applying your latest exceptions. An old instruction in a handoff does not by itself grant current authority.
 
 You can also resume things this skill never wrote. Any readable file, URL, page, or pasted document works; CE frontmatter is not required.
 
@@ -129,7 +129,7 @@ Skip it when:
 
 `/lfg` may offer an opt-in handoff at closeout for the next separately planned area. That offer waits for you; accepting creates a handoff for a fresh session to brainstorm that area, not an extension of the plan that just shipped.
 
-On resume, the skill recommends a continuation and stops. It does not invoke `ce-plan`, `ce-work`, `ce-debug`, or anything else on its own.
+On an orientation-only resume, the skill recommends a continuation and stops. A current request to continue may invoke the appropriate workflow within its existing authorization.
 
 ---
 
@@ -149,7 +149,7 @@ On resume, the skill recommends a continuation and stops. It does not invoke `ce
 ## FAQ
 
 **Does resume start the next skill for me?**
-No. It orients, recommends, and waits. Selection authorizes reading that source only.
+Only when your current request also authorizes continuation. Selecting a source alone requests orientation.
 
 **Can I resume something that was not created by this skill?**
 Yes. An explicit source does not need CE frontmatter or to have been written as a formal handoff.

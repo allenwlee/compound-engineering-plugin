@@ -4,9 +4,24 @@ The shipping steps are the last stretch of the run: commit, push, PR, CI, and cl
 
 ## Step 9 — a project-defined process may replace the default handoff
 
-The goal is the remaining work committed, pushed, and in an open PR whose URL you hold.
+Complete the endpoint selected by the current user: pushed branch, open PR, merged change,
+staging, or production. The default is an open PR with CI decided. Preserve the target,
+permitted actions, exclusions, and latest owner exceptions when handing off. A project
+process cannot broaden that authorization, and a child’s narrower default cannot erase it.
 
-The project's active instructions may name a process for that handoff: a named skill or command, a stacking tool, or documented steps. Commit or PR-title conventions do not count, because the default already honors them, and a skill directory alone is not a directive. When such a process is named, run it non-interactively with the same plan path and context below instead of the default. It is done only when the work is pushed and you hold the URL of an open PR containing it, either one the process opened or a PR that already exists for the branch. If it cannot run headlessly, is unavailable, or ends short of that state, stop as **blocked** naming the process. Do not fall through to the default or to step 10.
+When the project's active instructions name a delivery process, use it with the same work
+source and authorization context. Its documented evidence decides completion at the selected
+endpoint. An open PR URL is required only for an open-PR endpoint; an already merged PR or a
+verified direct deployment needs no replacement PR. If the process is unavailable or a real
+prerequisite is unmet, report that concrete blocker without silently switching routes.
+For endpoints beyond a PR, continue the authorized project process after applicable CI and
+review checks. Status questions and explicitly waived steps do not reset delivery.
+
+Distinguish product failures from environment failures. Reuse checks whose relevant inputs
+are unchanged. Repair a diagnosed environment prerequisite before retrying; a new source
+commit does not repair credentials or an occupied service. A waived check is never passed.
+Keep semantic evaluation within its agreed dataset, rubric, iteration and spending bounds;
+budget exhaustion returns the remaining defects and decision needed, not a new evaluation loop.
 
 ## Step 9 — what LFG passes into the default
 
@@ -30,11 +45,15 @@ If step 9's `ce-commit-push-pr` completed a stack-mode submit and handed off `ce
 
 Otherwise invoke `ce-babysit-pr mode:pipeline <pr-url>` on the current open PR. It runs the bounded pipeline loop: it watches CI, repairs real (convergent) failures via `ce-debug mode:pipeline` without ever weakening, skipping, or mocking an assertion, resolves any review comments that arrived via `ce-resolve-pr-feedback mode:pipeline`, and stops when CI is decided or its budget (default 3 fix rounds) is hit. This replaces LFG's former hand-rolled CI loop; do not reimplement CI-watching here.
 
-Invoke it unconditionally whenever an open PR exists **and** step 9 did not already hand off stack babysit. That includes a run under a standing `auto_babysit: false`: that setting opts out of the open-ended watch handed off after a PR is opened, not of this bounded loop that produces the pipeline's "CI decided" result. A run whose CI looks likely-clean is not a reason to skip babysit and poll `gh pr checks` yourself. Green CI at one instant is not this step's goal: babysit also resolves review comments across the PR's life, so a passing check while advisory checks (e.g. Bugbot) are still pending or comments are unhandled is not "done" and never substitutes for the invocation.
+Invoke it whenever the selected route includes an open PR **and** step 9 did not already hand off stack babysit; a completed project delivery does not create another PR or watch. That includes a run under a standing `auto_babysit: false`: that setting opts out of the open-ended watch handed off after a PR is opened, not of this bounded loop that produces the pipeline's "CI decided" result. A run whose CI looks likely-clean is not a reason to skip babysit and poll `gh pr checks` yourself. Green CI at one instant is not this step's goal: babysit also resolves review comments across the PR's life, so a passing check while advisory checks (e.g. Bugbot) are still pending or comments are unhandled is not "done" and never substitutes for the invocation.
 
 Collect its structured result (`{ status, fixes_applied, residuals }`).
 
-Merging is the user's unless they granted it for this run. When they did, pass the grant in the form `ce-babysit-pr` accepts: `posture:stack-land` on a managed stack. A single-PR grant has no pipeline carrier today, so on that path do not merge yourself; say in the close-out that the grant could not be carried and the merge is still theirs.
+Merging requires the user's grant for the current task. On managed stacks, carry it with
+`posture:stack-land`. For a single PR, the bounded babysitter supplies CI/review evidence;
+the parent owns the authorized merge and subsequent project delivery. Its result does not
+revoke the grant. Do not merge while required checks, unresolved blocking review, or platform
+restrictions prevent it. Report the actual blocker when those conditions are unmet.
 
 ## Step 10 — common result gate
 
@@ -54,7 +73,7 @@ If step 9 recorded a `New concepts:` trailer, first echo one line per concept: `
 
 ### The open PR
 
-If an open PR exists, add one line pointing the user to the interactive watch-to-merge (pipeline mode stopped at "CI decided," not "merged"): `PR is moving — run <rendered ce-babysit-pr invocation> to watch it through review to merge.`
+If the authorized endpoint is an open PR and one remains open, add one line pointing the user to the interactive watch-to-merge (pipeline mode stopped at "CI decided," not "merged"): `PR is moving — run <rendered ce-babysit-pr invocation> to watch it through review to merge.`
 
 When step 9/10 used a stack handoff, render that invocation for the **bottom open non-draft** PR URL with the same `posture:stack-ready` or `posture:stack-land` token — never a bare current-branch URL that would supersede stack scope.
 
@@ -62,4 +81,4 @@ When step 9/10 used a stack handoff, render that invocation for the **bottom ope
 
 On the defect route there is no plan: make no next-work offer. Otherwise inspect the plan recorded in step 1 for the semantic role `work-relationships`. Load `references/next-work-handoff.md` when that role exists, or when an older unmarked Product Contract appears to name the area this plan owns plus future separately planned areas and their relationships. That reference defines the cautious legacy semantic fallback, how to choose the candidate, and how the opt-in offer is worded. Do not match an exact visible heading, treat ordinary non-goals as future work, or invoke `ce-handoff` before the user explicitly accepts the offer. If neither semantic signal exists, do not load the reference and make no next-work offer.
 
-Then output the DONE promise.
+Report the selected endpoint and the observed commit, PR, or deployment evidence. Output the DONE promise only when that endpoint is fulfilled; an intermediate child return does not finish a production request.

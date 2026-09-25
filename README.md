@@ -456,3 +456,12 @@ Open an issue or send a PR, and we'll fold in what moves the plugin in the right
 ## License
 
 [MIT](LICENSE)
+
+### Authorized delivery and continuation
+
+LFG defaults to a reviewed, pushed pull request. An explicit project delivery request can
+instead finish at a pushed branch, merge, staging, or production, using the project's process
+and evidence. Existing authorization and later owner exceptions travel with the work; they
+are not replaced by a child's default PR endpoint. Ready plans remain usable across sessions
+after a material drift check. Handoff orientation alone stays read-only; an explicit request
+to continue permits the work that request actually authorizes.

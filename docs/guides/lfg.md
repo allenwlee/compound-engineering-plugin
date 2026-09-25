@@ -1,6 +1,6 @@
 # `lfg`
 
-> Carry a request end to end through the Compound Engineering skill whose job it is, hands-off. A change to the code ends in an open PR it pushes without stopping for approval; anything else ends with that skill's result. Merging stays with you unless you grant it for the run.
+> Carry a request to its authorized endpoint through the skill that owns it. Code changes default to an open PR; an explicit merge or deployment request continues through the project's delivery process.
 
 `lfg` chains the main Compound Engineering workflow into one long-running run: plan or diagnose, implement, simplify, review, apply eligible review fixes, capture any durable learning, run browser tests, commit, push, open a PR, then watch CI and repair failures inside a bounded loop.
 
@@ -18,13 +18,13 @@ It works best after `/ce-brainstorm`, because the pipeline can then plan against
 | When to use it | A software task or bug you want shipped hands-off: a plan from `/ce-brainstorm` or `/ce-plan`, a clear feature, or a reproducible defect |
 | What it produces | Code changes, commits, usually a PR. Unresolved review or CI leftovers become durable notes. No remote: local commits only. |
 | What's next | Review the PR. Run `/ce-babysit-pr` to watch it through review toward merge. |
-| What it does not do | Merge the PR, implement without a verified work source, execute a plan file it found on disk, or continue into the next area unless you accept a closeout handoff offer |
+| What it does not do | Merge without authorization, implement without a verified work source, execute an unidentified plan, or start separately planned future work without a request |
 
 ---
 
 ## Example invocations
 
-The usual path is a brainstorm followed by an empty `/lfg`. A plan path enriches that artifact, then ships. Stage assignments change who authors planning or implementation; the rest of the pipeline stays on `lfg`.
+The usual path is a brainstorm followed by an empty `/lfg`. An identified ready plan proceeds to implementation after a content and drift check; an insufficient plan is enriched in place. Stage assignments change who authors planning or implementation; the rest of the pipeline stays on `lfg`.
 
 ```text
 # Most common: settle requirements, then ship from that context
@@ -75,7 +75,7 @@ Without an explicit pipeline, autonomous runs skip planning, treat review as opt
 
 `lfg` states its goal and the conditions that gate it, then runs the usual sequence:
 
-1. **Route the request.** A request whose result is not a code change goes to the skill that owns that result (`ce-explain`, `ce-prototype`, `ce-pov`, `ce-ideate`, and the rest of the catalog), and the run ends with that skill's result: no branch, no PR. For a change to the code, get a verified work source. Only two things qualify: an implementation-ready plan, or a `fixed` return from `ce-debug`. The route depends on the request. A plan path or brainstorm artifact goes to `/ce-plan` to enrich; a plan `ce-plan` wrote earlier in this session goes straight to `ce-work`. A concrete report of failing or wrong behavior (an issue reference, a stack trace, a failing test) goes to `/ce-debug` in return-to-caller mode, which fixes on a feature branch and commits without pushing. A judgment the user did not settle ("switch the queue to X") goes to `/ce-pov` first; only a verdict that supports the change continues, with it carried into the plan as evidence. A request whose product shape has more than one plausible reading goes to `/ce-brainstorm` when a human is present, and to `/ce-plan` in pipeline mode when not. Everything else goes to `/ce-plan`, with a short settled-decisions brief from the conversation so decided things are not re-asked. `lfg` never searches `docs/plans/` for a candidate: the plan is one the session identifies.
+1. **Route the request.** A request whose result is not a code change goes to the skill that owns that result (`ce-explain`, `ce-prototype`, `ce-pov`, `ce-ideate`, and the rest of the catalog), and the run ends with that skill's result: no branch, no PR. For a change to the code, get a verified work source. Only two things qualify: an implementation-ready plan, or a `fixed` return from `ce-debug`. The route depends on the request. An identified implementation-ready plan goes straight to `ce-work` after a content and drift check, regardless of session age; an insufficient plan or requirements-only artifact goes to `/ce-plan` to enrich. A concrete report of failing or wrong behavior (an issue reference, a stack trace, a failing test) goes to `/ce-debug` in return-to-caller mode, which fixes on a feature branch and commits without pushing. A judgment the user did not settle ("switch the queue to X") goes to `/ce-pov` first; only a verdict that supports the change continues, with it carried into the plan as evidence. A request whose product shape has more than one plausible reading goes to `/ce-brainstorm` when a human is present, and to `/ce-plan` in pipeline mode when not. Everything else goes to `/ce-plan`, with a short settled-decisions brief from the conversation so decided things are not re-asked. `lfg` never searches `docs/plans/` for a candidate: the plan is one the session identifies.
 2. `/ce-work` runs in return-to-caller mode on the plan route so `lfg` keeps the shipping steps. Behavior-changing work must return verification evidence. Missing evidence is retried once, then the run stops rather than shipping blind. On the defect route `ce-debug`'s fix is the implementation and its return is gated the same way.
 3. `/ce-simplify-code` runs on the branch diff before review, unless the change is docs-only or roughly under 10 lines.
 4. `/ce-code-review` (`mode:agent`) reports findings. `lfg` applies eligible mechanical fixes and commits them. Review itself does not edit the tree. On the defect route review runs without a plan and reads the root cause as its intent.
@@ -84,11 +84,11 @@ Without an explicit pipeline, autonomous runs skip planning, treat review as opt
 7. `/ce-test-browser` runs in pipeline mode.
 8. `/ce-commit-push-pr mode:pipeline branding:on` commits remaining changes, pushes, opens a PR when a remote exists, and marks CE provenance. On the defect route the PR body carries the root cause and links the ticket. If the project's instructions name their own shipping process (say, a `/create-pr` skill), that process runs instead, so CE branding may not appear.
 9. `/ce-babysit-pr mode:pipeline` watches the open PR: CI repairs via `/ce-debug`, incoming review comments via `/ce-resolve-pr-feedback`, up to three fix rounds by default. Pipeline babysit stops at "CI decided," not "merged."
-10. Print `DONE`. If the plan named a larger body of separately planned work and an area is still unplanned, `lfg` may offer an opt-in `/ce-handoff` for a fresh session. It does not continue that area itself.
+10. If the user selected a further delivery endpoint, complete the authorized project continuation and verify that endpoint before printing `DONE`. Otherwise print `DONE`. If the plan named a larger body of separately planned work and an area is still unplanned, `lfg` may offer an opt-in `/ce-handoff` for a fresh session. It does not continue that area itself.
 
 An invalidating settlement conflict from planning or review stops the pipeline before shipping. Non-halting flagged conflicts become residuals that reach the PR's settled-decisions line.
 
-No git remote: commit locally and skip push, PR creation, and CI watch. That is a terminal local-only path, not an error to retry.
+No git remote: commit locally and skip push, PR creation, and CI watch. Report a missing prerequisite if the requested endpoint needs a remote; local commits do not fulfill that endpoint.
 
 `lfg` never launches `/goal` itself. If goal-mode is the right engine, `ce-work` chooses it and must still return control.
 
@@ -188,7 +188,7 @@ Output: code changes, commits, and usually a PR. No configured git remote: local
 ## FAQ
 
 **Does `lfg` merge the PR?**
-Not by default. Pipeline babysit stops when CI is decided (or the fix budget is hit) and merge stays yours; the closeout line points at `/ce-babysit-pr` for an interactive watch toward merge. If you grant merging for the run, `lfg` passes that grant to the babysitter in the form it accepts; today that is `posture:stack-land` for a managed stack. A single-PR merge grant has no pipeline carrier yet, so on that path `lfg` says the merge is still yours.
+Not by default. Pipeline babysit stops when CI is decided (or the fix budget is hit) and merge stays yours; the closeout line points at `/ce-babysit-pr` for an interactive watch toward merge. If you grant merging for the run, `lfg` passes that grant to the babysitter in the form it accepts; today that is `posture:stack-land` for a managed stack. For a single PR, the parent retains an explicit merge grant and performs the authorized merge after applicable checks; it does not invent a carrier for the child skill.
 
 **Will it stop and ask me to approve the plan or the diff?**
 No. That is the point of the skill, and why it is the wrong tool for in-the-loop work. The one thing it can ask about is product shape: when a request has several plausible product readings and you are present, it runs `ce-brainstorm` and that dialogue asks its questions. Headless runs never ask; `ce-plan` records its assumptions in the plan instead.
@@ -197,7 +197,7 @@ No. That is the point of the skill, and why it is the wrong tool for in-the-loop
 Yes. `/lfg fix this bug ESP-1234`, a stack trace, or a failing test path routes to `ce-debug`, which reproduces, root-causes, and fixes on a feature branch. Only a `fixed` return continues to review and shipping; a divergent fix (one that would reverse deliberate behavior) stops the run as `needs-human` with nothing pushed. A ticket that describes a feature takes the plan route instead.
 
 **I already ran `/ce-plan`. Will `lfg` plan again?**
-No. A plan `ce-plan` wrote in this session goes straight to `ce-work`, which verifies it by content. A requirements-only artifact from `ce-brainstorm`, or a path to an older plan, goes through `ce-plan` so it is enriched or checked for drift first.
+A selected implementation-ready plan goes straight to `ce-work` after checking content and material drift, regardless of session age. A requirements-only or insufficient plan is enriched in place by `ce-plan`.
 
 **What if planning cannot produce an implementation-ready code plan?**
 The pipeline stops. Non-software tasks, requirements-only leftovers, knowledge-work plans, and invalidating settlement conflicts all halt before implementation.

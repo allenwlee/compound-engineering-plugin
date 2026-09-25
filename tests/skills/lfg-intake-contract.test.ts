@@ -39,7 +39,7 @@ describe("lfg work source and routes", () => {
   })
 
   test("only a verified plan or a fixed debug return is a work source, and nothing is discovered on disk", () => {
-    expect(lfg).toMatch(/only two things qualify/)
+    expect(lfg).toMatch(/Only two things qualify/)
     expect(lfg).toMatch(/`fixed` return from `ce-debug`/)
     expect(lfg).toMatch(/Never search the plans directory/)
     // ce-work's blank-invocation discovery exists; lfg must never reach it.
@@ -47,11 +47,11 @@ describe("lfg work source and routes", () => {
     expect(intake).toMatch(/`lfg` never invokes `ce-work` blank/)
   })
 
-  test("a same-session plan goes straight to ce-work; older or requirements-only plans go through ce-plan", () => {
-    expect(intake).toMatch(/wrote in this session[\s\S]{0,200}invokes `ce-work` on it directly/)
-    expect(intake).toMatch(/requirements-only artifact, or a path to a plan from an earlier session[\s\S]{0,120}invoke `ce-plan`/)
-    // The this-run gate stays on the plan route; plan-brief records the bypass.
-    expect(lfg).toContain("a plan file `ce-plan` reported writing this run")
+  test("identified ready plans survive sessions; insufficient plans return to planning", () => {
+    expect(intake).toContain("from this or an earlier session")
+    expect(intake).toContain("content or material drift leaves implementation decisions unresolved")
+    expect(intake).toContain("step 2 invokes `ce-work` on it directly")
+    expect(planBrief).toContain("regardless of session age")
     expect(planBrief).toMatch(/bypasses `ce-plan` per `references\/intake\.md`/)
   })
 

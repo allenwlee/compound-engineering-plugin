@@ -370,7 +370,7 @@ describe("missing-owner blocked seam parity (ce-plan/ce-work -> lfg)", () => {
     // Restated in plain language (2026-09); the pin guards the re-read condition, not the word "owner".
     expect(cePlan).toContain("is read again at its step even when already in context")
     expect(lfg).toContain("Blocked status outranks an existing artifact")
-    expect(lfg).toContain("Only absence of both a blocker and a plan file")
+    expect(lfg).toContain("If planning was invoked and returned neither a blocker nor a plan path")
     // 2026-08-21 eval: a stale plan already under <root>/plans/ satisfied the gate once; the gate keys on the reported path.
     expect(lfg).toContain("a plan file `ce-plan` reported writing this run")
     expect(planBrief).toContain("the path `ce-plan` reported writing this run")
