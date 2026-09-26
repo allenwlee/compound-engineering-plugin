@@ -102,26 +102,26 @@ describe("ce-compound YAML safety rule presence", () => {
     })
   }
 
-  test("ce-compound/SKILL.md points at YAML Safety Rules in both frontmatter-writing spots", async () => {
-    const raw = await readFile(
-      path.join(PLUGIN_ROOT, "ce-compound", "SKILL.md"),
-      "utf8",
-    )
-    // Match the distinctive write-path pointer phrase, not generic yaml-schema.md
-    // references (which also appear in the support-files list and inputs section).
-    // Both Full-mode Phase 2 step 5 and Lightweight mode step 3 must carry the
-    // pointer so dropping either one is caught.
-    const pointer = /YAML[- ]safety\s+quoting\s+rule\s+for\s+array\s+items/gi
-    const pointerMatches = raw.match(pointer) ?? []
-    expect(pointerMatches.length).toBeGreaterThanOrEqual(2)
-
-    // Each pointer must sit in the frontmatter-write step (step 5 of Full mode,
-    // step 3 of Lightweight mode), not drift to an unrelated location. Both
-    // steps carry the "YAML frontmatter" phrase adjacent to the pointer.
-    const frontmatterAdjacent = raw.match(
-      /YAML\s+frontmatter[\s\S]{0,400}?YAML[- ]safety\s+quoting\s+rule\s+for\s+array\s+items/gi,
-    ) ?? []
-    expect(frontmatterAdjacent.length).toBeGreaterThanOrEqual(2)
+  test("ce-compound points at YAML Safety Rules in both frontmatter-writing spots", async () => {
+    // Issue #606. Both write paths moved into the references the body names at
+    // their step — Full mode's assembly and Lightweight's single pass — so the
+    // pointer is asserted in each file that now owns a frontmatter write.
+    const files = [
+      path.join(PLUGIN_ROOT, "ce-compound", "references", "assembly.md"),
+      path.join(PLUGIN_ROOT, "ce-compound", "references", "lightweight.md"),
+    ]
+    for (const file of files) {
+      const raw = await readFile(file, "utf8")
+      // Match the distinctive write-path pointer phrase, not generic yaml-schema.md
+      // references (which also appear in inputs and support-file lists).
+      expect(raw, `${file} lost the YAML-safety pointer`).toMatch(
+        /YAML[- ]safety\s+quoting\s+rule\s+for\s+array\s+items/i,
+      )
+      // The pointer must sit in the frontmatter-write step, not drift elsewhere.
+      expect(raw, `${file} moved the pointer off the frontmatter step`).toMatch(
+        /YAML\s+frontmatter[\s\S]{0,400}?YAML[- ]safety\s+quoting\s+rule\s+for\s+array\s+items/i,
+      )
+    }
   })
 
   test("ce-compound-refresh per-action-flows reference points at YAML-safety rules in the Replace flow", async () => {
@@ -140,5 +140,81 @@ describe("ce-compound YAML safety rule presence", () => {
     const replaceFlow = replaceFlowMatch?.[1] ?? ""
     expect(/YAML[- ]safety/i.test(replaceFlow)).toBe(true)
     expect(replaceFlow).toMatch(/yaml-schema\.md/)
+  })
+})
+
+// The body carries the conditions and one pointer per step; the detail moved into
+// references the body names at that step. Split the guard the same way: the body
+// pins the mandatory reads (a lost pointer silently drops the whole reference),
+// and each reference keeps the invariant it now owns.
+describe("ce-compound-refresh body pointers and relocated invariants", () => {
+  const ref = (name: string) =>
+    readFile(path.join(PLUGIN_ROOT, "ce-compound-refresh", "references", name), "utf8")
+
+  test("the body names every reference at the step that needs it", async () => {
+    const skill = await readFile(
+      path.join(PLUGIN_ROOT, "ce-compound-refresh", "SKILL.md"),
+      "utf8",
+    )
+    for (const name of [
+      "modes.md",
+      "scope.md",
+      "investigate.md",
+      "classify.md",
+      "per-action-flows.md",
+      "concepts-vocabulary.md",
+      "report.md",
+      "commit.md",
+      "discoverability.md",
+    ]) {
+      expect(skill, `SKILL.md must point at references/${name}`).toContain(`references/${name}`)
+    }
+  })
+
+  test("relocated invariants stay stated in the reference that owns them", async () => {
+    // Auto-delete is the only unattended destructive path; its gate must survive the move.
+    expect(await ref("classify.md")).toContain("Auto-delete")
+    expect(await ref("classify.md")).toMatch(/all three hold/)
+    // Non-interactive delivery splits into applied vs recommended writes.
+    const report = await ref("report.md")
+    expect(report).toContain("**Applied:**")
+    expect(report).toContain("**Recommended:**")
+    // Unattended relocation is gated on four conditions, splits never auto-apply.
+    expect(await ref("modes.md")).toMatch(/four-condition gate/)
+    expect(await ref("modes.md")).toMatch(/Splits are always recommend-only/)
+    // A scope hint that matches nothing must not widen to the whole store.
+    expect(await ref("scope.md")).toMatch(/report the miss and exit/)
+  })
+})
+
+describe("ce-compound-refresh named-guidance comparison", () => {
+  test("ce-compound-refresh compares a knowledge-track learning against guidance it names, and never edits that guidance", async () => {
+    // Narrow form of issue #1265: the check is bounded to guidance files the
+    // learning itself names (no search over the guidance layer), and the
+    // refresh only reports a wrong skill/runbook/instruction file.
+    const raw = await readFile(path.join(PLUGIN_ROOT, "ce-compound-refresh", "SKILL.md"), "utf8")
+    const section = (name: string) =>
+      raw.match(new RegExp(`##\\s+${name}\\b([\\s\\S]*?)(?=\\n##\\s+\\w|$)`))?.[1] ?? ""
+    const investigate = section("Investigate")
+    const classify = section("Classify")
+    expect(investigate).toMatch(/guidance file[^\n]*(names|links)/i)
+    // The blockquoted subagent prompt is what delegated investigations see; pin it on its own.
+    expect(investigate).toMatch(/^> [^\n]*guidance file[^\n]*(names|links)/im)
+    expect(classify).toMatch(/never edit[^\n]*(skill|runbook|instruction file)/i)
+  })
+})
+
+// Isolation forbids sharing a bundled script, so both skills ship
+// scripts/light-webserver.js. The helper now has an opt-in annotate event
+// path; default start stays event-inert. Display-only vs interactive remains
+// skill protocol, and the copies must stay byte-identical.
+describe("light-webserver.js drift across ce-brainstorm and ce-prototype", () => {
+  test("scripts/light-webserver.js is identical across ce-brainstorm, ce-prototype", async () => {
+    const contents = await Promise.all(
+      ["ce-brainstorm", "ce-prototype"].map((skill) =>
+        readFile(path.join(PLUGIN_ROOT, skill, "scripts", "light-webserver.js"), "utf8"),
+      ),
+    )
+    expect(contents[1]).toBe(contents[0])
   })
 })

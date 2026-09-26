@@ -48,23 +48,23 @@ Carry out the approach. When the answer depends on facts the model can't reliabl
 
 Answer in chat. Do **not** write a plan file and do **not** run the Step 3 save/share menu by default. If the investigation produced something the user might want to keep (a comparison table, a sourced summary), offer to save it; otherwise just give the answer. In headless or non-interactive runs, skip the offer and deliver the answer.
 
-### Veil of value: what to surface, what to hide
+### Veil of value: what to show, what to hide
 
 The plan-of-attack and the answer are for the caller; the skill's internal machinery is not. Edit for relevance the way an expert consultant does — they tell you their thinking about your problem, not which template their back office applied.
 
-- **Surface** (question-domain — reads as value): the approach to the user's actual question, in the user's terms.
+- **Show** (question-domain — reads as value): the approach to the user's actual question, in the user's terms.
 - **Hide** (skill-domain — process exhaust): which skill, mode, or phase is running; whether a plan file was or wasn't written; the routing or disposition decision itself.
-- **Never hide** (audit content — affects trust in the answer): caveats, gaps, and uncertainty. "I could only pull his last ~100 stars, so this is partial" or "this is my read, not a hard signal" is not junk — it is what a good assistant surfaces. The veil hides plumbing, never the limits of the answer.
+- **Never hide** (audit content — affects trust in the answer): caveats, gaps, and uncertainty. "I could only pull his last ~100 stars, so this is partial" or "this is my read, not a hard signal" is not junk — it is what a good assistant says out loud. The veil hides plumbing, never the limits of the answer.
 
 Register example, for "how often does he star things — is this a big deal?":
 
 > Wrong: "Quick note first: `ce-plan` builds implementation plans, so I ignored the template and just answered the question. Here's what the data says..."
 
-Leaks the skill's name, narrates an internal routing decision, apologizes for deviating — the caller sees the seams of the tool.
+Leaks the skill's name, narrates an internal routing decision, apologizes for deviating — the caller sees the tool's machinery.
 
 > Right: "Let me size this up — I'll check how active a starrer he is overall, his recent cadence, and the kinds of repos he tends to star, then weigh where this one lands. [gathers data] Yes, this is a real signal: ..."
 
-Same underlying process; none of the machinery surfaces. The caller sees thinking about their question.
+Same underlying process; none of the machinery shows. The caller sees thinking about their question.
 
 ---
 
@@ -98,7 +98,7 @@ Example for "plan a date night in Seattle this Saturday":
 
 ## Step 1b: Focused Q&A
 
-Ask up to 3 questions targeting the unknowns that would most change the plan. Use the platform's blocking question tool: `AskUserQuestion` in Claude Code (call `ToolSearch` with `select:AskUserQuestion` first if its schema isn't loaded), `request_user_input` in Codex, `ask_question` in Antigravity CLI (`agy`), `ask_user` in Pi (requires the `pi-ask-user` extension). Fall back to numbered options in chat only when no blocking tool exists or the call errors (e.g., Codex edit modes) — not because a schema load is required. Never silently skip the question.
+Ask up to 3 questions targeting the unknowns that would most change the plan. Use the host's blocking question tool already in the current tool list (match by capability, not by a host-specific name). Presence in the current tool list is proof the tool exists; never call a user-facing question tool to discover whether it exists. If a matching tool is listed but unloaded, use the host's tool-discovery primitive to load that capability — do not search for another host's tool name. Fall back to numbered options on the host's user-visible chat surface only when no such tool is in the list or a real question call errors. Never silently skip the question.
 
 **How to ask well:**
 - Offer informed options, not open-ended blanks. Instead of "When are you going?", try "Mid-week visits have 30-40% shorter lines — are you flexible on timing?" The question should give the user a frame of reference, not just extract information.
@@ -147,7 +147,7 @@ Example: A date night plan should present 2-3 restaurant options, 2-3 activity o
 
 ## Step 3: Save or Share
 
-After structuring the plan, ask the user how they want to receive it using the platform's blocking question tool: `AskUserQuestion` in Claude Code (call `ToolSearch` with `select:AskUserQuestion` first if its schema isn't loaded), `request_user_input` in Codex, `ask_question` in Antigravity CLI (`agy`), `ask_user` in Pi (requires the `pi-ask-user` extension). Fall back to numbered options in chat only when no blocking tool exists or the call errors (e.g., Codex edit modes) — not because a schema load is required. Never silently skip the question.
+After structuring the plan, ask the user how they want to receive it using the host's blocking question tool already in the current tool list (match by capability, not by a host-specific name). Fall back to numbered options on the host's user-visible chat surface only when no such tool is in the list or a real question call errors. Never silently skip the question.
 
 **Question:** "Plan ready. How would you like to receive it?"
 
@@ -158,7 +158,7 @@ After structuring the plan, ask the user how they want to receive it using the p
    - Current working directory
    - `/tmp`
    - A custom path
-   - Use filename convention: `YYYY-MM-DD-<descriptive-name>-plan.md`
+   - Use filename convention: `YYYY-MM-DD-HHMM-<descriptive-name>-plan.md`, taking `HHMM` from the local wall-clock time at write; reserve the path atomically and, on collision, retry with the smallest available numeric suffix before the extension rather than overwriting
    - Start the document with a `# Title` heading, followed by `Created: YYYY-MM-DD` on the next line. No YAML frontmatter.
 
 2. **Publish to Proof — shareable link** — Publish the doc to Every's Proof editor and get a shareable link to read, comment on, or share with others. Load the `ce-proof` skill to create the shared document and return the URL. One-way: nothing syncs back to disk.

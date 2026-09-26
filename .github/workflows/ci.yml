@@ -34,6 +34,11 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # A wedged bun --parallel worker (oven-sh/bun#34069) can sit with no output
+    # forever; green runs take about 4 minutes and a timeout-stack run with the
+    # serial re-run about 15. Fail well before GitHub's 6-hour default so the
+    # babysit loop can see it and rerun.
+    timeout-minutes: 30
 
     env:
       # Single source of truth for the pinned `claude plugin validate` version:
@@ -113,6 +118,13 @@ jobs:
   # patching reaches them from Linux or Mac.
   windows-native:
     runs-on: windows-latest
+    # Green runs finish in about 90 seconds. The Windows smoke step below buffers
+    # its output to a file and can hang with nothing printed when a detached
+    # supervisor never exits (2026-09-14, PR #1711 run 34909130752: 25+ minutes
+    # stuck, unresponsive to cancel and force-cancel). Fail well before GitHub's
+    # 6-hour default so the babysit loop can see it and rerun; 10 minutes still
+    # covers the smoke step's three-attempt ctypes retry.
+    timeout-minutes: 10
 
     steps:
       # Keep LF in the working tree so newline-anchored parity regexes match.
@@ -143,7 +155,28 @@ jobs:
         run: python tests/fixtures/peer-job-runner-unit.py
 
       - name: Peer-job-runner Windows smoke
-        run: python tests/fixtures/peer-job-runner-windows-smoke.py
+        # Hosted windows-latest Python intermittently fails `import ctypes`
+        # mid-suite (DLL init on _ctypes) after earlier tests already passed.
+        # Product code cannot recover. Retries are signature-gated: only
+        # `DLL load failed while importing _ctypes` is retried; any other
+        # nonzero exit fails this step immediately. A retried attempt's log is
+        # suppressed so a green step never shows failure dumps; the full log
+        # prints on success and on the terminal failure.
+        shell: pwsh
+        run: |
+          $max = 3
+          for ($i = 1; $i -le $max; $i++) {
+            $log = Join-Path $env:TEMP "peer-job-runner-windows-smoke-$i.log"
+            python tests/fixtures/peer-job-runner-windows-smoke.py *> $log
+            $code = $LASTEXITCODE
+            $text = Get-Content -Raw -ErrorAction SilentlyContinue $log
+            if (($code -eq 0) -or ($text -notmatch 'DLL load failed while importing _ctypes') -or ($i -eq $max)) {
+              if ($null -ne $text) { Write-Host $text }
+              exit $code
+            }
+            Write-Host "Windows smoke hit known _ctypes flake (attempt $i/$max, exit $code); output suppressed, retrying"
+            Start-Sleep -Seconds 15
+          }
 
       - name: Peer-job-runner parity
         run: bun test tests/peer-job-runner-parity.test.ts

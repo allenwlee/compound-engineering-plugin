@@ -84,10 +84,10 @@ describe("html-rendering.md reference content invariants", () => {
     // 2026-05-17 supply-chain plan dogfood failure: 8 Implementation Units
     // rendered fully expanded with no collapsibles. Reader can't see the
     // unit list at a glance. The reference promotes default-closed <details>
-    // for repeating cards from a soft anatomy pattern to a load-bearing rule
+    // for repeating cards from a soft anatomy pattern to a required rule
     // with a count threshold so the rule has a concrete trigger.
     expect(
-      /3\+ units the default-closed rule is load-bearing|3\+ instances put secondary content inside default-closed|default-closed.*load-bearing/i.test(REFERENCE),
+      /3\+ units the default-closed rule must hold|3\+ instances put secondary content inside default-closed|default-closed rule must hold/i.test(REFERENCE),
       "Reference must require default-closed <details> for repeating cards at 3+ instances.",
     ).toBe(true)
   })
@@ -423,15 +423,14 @@ describe("html-rendering.md reference content invariants", () => {
     ).toBe(true)
   })
 
-  test("visible readiness metadata rendered, no hidden duplicate copy", () => {
-    // U5: HTML must carry artifact_readiness (and the rest of the contract
-    // metadata) as VISIBLE header text, never as a hidden JSON/data-*/<meta>
+  test("visible artifact metadata rendered, no hidden duplicate copy", () => {
+    // HTML contract metadata stays visible rather than duplicated in JSON/data-*/<meta>
     // duplicate that drifts from the visible copy.
     expect(
-      /Visible readiness metadata/i.test(REFERENCE),
-      "Reference must require visible readiness metadata in the HTML header.",
+      /Visible artifact metadata/i.test(REFERENCE),
+      "Reference must require visible artifact metadata in the HTML header.",
     ).toBe(true)
-    for (const field of ["artifact_readiness", "artifact_contract", "product_contract_source"]) {
+    for (const field of ["artifact_contract", "product_contract_source"]) {
       expect(
         REFERENCE.includes(field),
         `Reference must name the unified contract metadata field "${field}" to render visibly.`,

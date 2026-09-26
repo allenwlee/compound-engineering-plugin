@@ -15,16 +15,63 @@ async function readRepoFile(relativePath: string): Promise<string> {
   return readFile(path.join(process.cwd(), relativePath), "utf8")
 }
 
-const BABYSIT = "skills/ce-babysit-pr/SKILL.md"
+const BABYSIT_BODY = "skills/ce-babysit-pr/SKILL.md"
 const WATCH_LOOP = "skills/ce-babysit-pr/references/watch-loop.md"
+// The always-loaded body is capped at Codex's 8000-byte prompt budget, so most of the contract text
+// lives in references the skill loads at the point of use. Contract greps run against the whole
+// corpus (body + references); the "always-loaded body pins" block below asserts the few rules that
+// must be in the window without a reference read.
+const BABYSIT_REFERENCES = [
+  "references/envelope.md",
+  "references/setup.md",
+  "references/tick.md",
+  "references/branch-currency.md",
+  "references/stack.md",
+  "references/settle.md",
+  "references/pipeline.md",
+  "references/report.md",
+  "references/watch-loop.md",
+].map((rel) => `skills/ce-babysit-pr/${rel}`)
+
+async function readBabysit(): Promise<string> {
+  const parts = await Promise.all([BABYSIT_BODY, ...BABYSIT_REFERENCES].map(readRepoFile))
+  return parts.join("\n")
+}
 const CEDEBUG_PIPELINE = "skills/ce-debug/references/pipeline-mode.md"
+
+describe("pr-snapshot emits agent-read payloads compactly", () => {
+  // The agent reads a snapshot every tick. Pretty-printing it spent ~31% of the payload
+  // (6,473 -> 4,453 bytes on a 6-thread / 14-check / 5-comment PR) on whitespace nothing
+  // reads. The persisted state file is the deliberate exception: it costs no agent tokens
+  // and a human debugging a stuck watch reads it.
+  test("stdout is compact; the on-disk state file stays indented", async () => {
+    const script = await readRepoFile("skills/ce-babysit-pr/scripts/pr-snapshot")
+    expect(script).toContain('print(json.dumps(result, separators=(",", ":")))')
+    expect(script).not.toMatch(/print\(json\.dumps\([^)]*indent=2/)
+    expect(script).toContain('json.dump(box["state"], tmp, indent=2)')
+  })
+})
+
 const CERESOLVE = "skills/ce-resolve-pr-feedback/SKILL.md"
 const CERESOLVE_FULL_MODE = "skills/ce-resolve-pr-feedback/references/full-mode.md"
+const CERESOLVE_PIPELINE = "skills/ce-resolve-pr-feedback/references/pipeline-mode.md"
+const CERESOLVE_RUBRIC = "skills/ce-resolve-pr-feedback/references/evaluation-rubric.md"
+const COMMIT_PUSH_HANDOFF = "skills/ce-commit-push-pr/references/apply-and-handoff.md"
+const LFG_SHIPPING_TAIL = "skills/lfg/references/shipping.md"
 const PR_SNAPSHOT = "skills/ce-babysit-pr/scripts/pr-snapshot"
+
+const NEEDS_HUMAN_RESIDUAL_FIELDS = [
+  "quoted_feedback",
+  "investigation",
+  "decision_reason",
+  "options",
+  "recommendation",
+  "thread_urls",
+]
 
 // ce-debug's pipeline-mode structured return. babysit branches on this exact set (Step 2 step 5)
 // and warns "do not invent infra-retry/stale" — so both the vocabulary and the ban are protocol.
-const CEDEBUG_STATUS = ["fixed-and-pushed", "diagnosed-no-fix", "flaky-infra", "needs-human"]
+const CEDEBUG_STATUS = ["fixed-and-pushed", "fixed-not-pushed", "diagnosed-no-fix", "flaky-infra", "needs-human"]
 
 // pr-snapshot's trajectory block (emitted by _update_trajectory). The subset each consumer cites
 // by name is protocol for that consumer: rename a field in the emitter and the citation dangles.
@@ -37,6 +84,7 @@ const TRAJECTORY_FIELDS = [
   "new_threads_this_tick",
   "stream_alternations",
   "heads_since_progress",
+  "invariant_rounds",
 ]
 const BABYSIT_TRAJECTORY_REFS = [
   "check_recur_max",
@@ -45,8 +93,9 @@ const BABYSIT_TRAJECTORY_REFS = [
   "new_threads_this_tick",
   "stream_alternations",
   "heads_since_progress",
+  "invariant_rounds",
 ]
-const CERESOLVE_TRAJECTORY_REFS = ["unresolved_trend", "new_threads_this_tick"]
+const CERESOLVE_TRAJECTORY_REFS = ["unresolved_trend", "new_threads_this_tick", "invariant_rounds"]
 
 function emittedTrajectoryKeys(script: string): string[] {
   const fn = script.slice(script.indexOf("def _update_trajectory"))
@@ -57,7 +106,7 @@ function emittedTrajectoryKeys(script: string): string[] {
 
 describe("ce-babysit-pr cross-skill contract parity", () => {
   test("ce-debug pipeline return-status enum agrees between producer and babysit consumer", async () => {
-    const [producer, consumer] = await Promise.all([readRepoFile(CEDEBUG_PIPELINE), readRepoFile(BABYSIT)])
+    const [producer, consumer] = await Promise.all([readRepoFile(CEDEBUG_PIPELINE), readBabysit()])
     for (const status of CEDEBUG_STATUS) {
       expect(producer, `ce-debug must still emit '${status}'`).toContain(status)
       expect(consumer, `babysit must still branch on '${status}'`).toContain(status)
@@ -79,7 +128,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
     // 'rebase' and 'force-push' are specific enough to canary the exclusion block; 'merge' is not
     // (merge-ready / merge conflict are ordinary prose here).
     const [babysit, cedebug, ceresolve] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile(CEDEBUG_PIPELINE),
       readRepoFile(CERESOLVE),
     ])
@@ -92,7 +141,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
   test("every trajectory field cited in consumer prose is one pr-snapshot actually emits", async () => {
     const script = await readRepoFile(PR_SNAPSHOT)
     const emitted = new Set(emittedTrajectoryKeys(script))
-    const [babysit, ceresolve] = await Promise.all([readRepoFile(BABYSIT), readRepoFile(CERESOLVE)])
+    const [babysit, ceresolve] = await Promise.all([readBabysit(), readRepoFile(CERESOLVE)])
     for (const field of BABYSIT_TRAJECTORY_REFS) {
       expect(emitted.has(field), `babysit cites '${field}' but pr-snapshot no longer emits it`).toBe(true)
       expect(babysit).toContain(field)
@@ -106,7 +155,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
   test("babysit's default mode is a self-sustaining in-session watch backed by pr-snapshot watch", async () => {
     // The self-initiation contract: babysit does NOT do one tick and hand back a resume command by
     // default; it backgrounds the token-free change-detector and stays in-session, woken by a sentinel.
-    const [babysit, script] = await Promise.all([readRepoFile(BABYSIT), readRepoFile(PR_SNAPSHOT)])
+    const [babysit, script] = await Promise.all([readBabysit(), readRepoFile(PR_SNAPSHOT)])
     expect(babysit, "must describe the self-sustaining in-session watch").toMatch(/self-sustaining[, ]+in-session watch/i)
     expect(babysit, "must invoke the pr-snapshot watch detector").toContain("pr-snapshot watch")
     expect(babysit, "must wait on the BABYSIT_WAKE sentinel").toContain("BABYSIT_WAKE")
@@ -139,7 +188,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
 
   test("watch ownership is latest-valid-wins and stale wake generations are coalesced", async () => {
     const [babysit, watchLoop, script] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile("skills/ce-babysit-pr/references/watch-loop.md"),
       readRepoFile(PR_SNAPSHOT),
     ])
@@ -156,7 +205,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
   })
 
   test("the paginated snapshot is canonical for review-thread state", async () => {
-    const babysit = await readRepoFile(BABYSIT)
+    const babysit = await readBabysit()
     expect(babysit).toMatch(/fresh `snapshot`[^.]{0,160}(canonical|source of truth)/i)
     expect(babysit).toContain("`hasNextPage == false`")
   })
@@ -164,10 +213,24 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
   test("babysit reconciles every passed comment so the loop can settle (never-settle fix)", async () => {
     // Regression guard: marking only the comments ce-resolve explicitly 'handled' left its
     // silently-dropped bot wrappers actionable forever, so counts.comments never reached 0.
-    const babysit = await readRepoFile(BABYSIT)
+    const babysit = await readBabysit()
     expect(babysit).toMatch(/silently drop/i)
     expect(babysit, "must mark every passed comment, not only the handled ones").toMatch(/mark \*?every\*? comment you passed/i)
     expect(babysit).toContain("never settle")
+  })
+
+  test("neither non-thread fetcher excludes feedback by author identity", async () => {
+    // The two fetchers are one chain: pr-snapshot decides whether a tick invokes ce-resolve at all,
+    // and get-pr-comments decides what that pass can see. When both excluded comments whose author
+    // matched the PR author, a plain "please rename X" on an agent-opened PR was invisible end to
+    // end — no wake, no pass, and babysit could report the PR ready with the request unhandled.
+    // Loop prevention lives in the dispatched mark and in ce-resolve's actionability filter.
+    const [snapshotScript, getComments] = await Promise.all([
+      readRepoFile(PR_SNAPSHOT),
+      readRepoFile("skills/ce-resolve-pr-feedback/scripts/get-pr-comments"),
+    ])
+    expect(snapshotScript).not.toContain("a != author")
+    expect(getComments).not.toContain("!= $author.login")
   })
 
   test("ce-resolve routes a whole-PR URL to full mode, a comment-fragment URL to targeted", async () => {
@@ -192,7 +255,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
     // Incremental commits during a watch leave the PR description stale; babysit must reflect on
     // that before declaring merge-ready and route a stale one to ce-commit-push-pr's description
     // update — autonomously, as an owned/pre-authorized mutation, not a user prompt.
-    const babysit = await readRepoFile(BABYSIT)
+    const babysit = await readBabysit()
     expect(babysit).toContain("PR-description freshness")
     expect(babysit).toContain("description-update mode")
     expect(babysit).toContain("ce-commit-push-pr")
@@ -203,38 +266,93 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
     // Regression guard (PR #1126 watch): stating "use ~600s whenever review bots are present" in the
     // looks-ready gate made agents pre-widen the initial arm, so a finished review sat unrecognized
     // until the longer window elapsed. The initial arm must always ride the script default.
-    const [babysit, script] = await Promise.all([readRepoFile(BABYSIT), readRepoFile(PR_SNAPSHOT)])
+    const [babysit, script] = await Promise.all([readBabysit(), readRepoFile(PR_SNAPSHOT)])
     const watchCommands = [...babysit.matchAll(/^.*pr-snapshot" watch.*$/gm)].map((m) => m[0])
     expect(watchCommands.length, "the watch invocation must still be shown").toBeGreaterThanOrEqual(1)
     for (const cmd of watchCommands) {
       expect(cmd, "the normal watch invocation must not set --settle-seconds").not.toContain("--settle-seconds")
     }
-    expect(script, "the script must own the 300s settle default").toMatch(/--settle-seconds"[^)]*default=300/s)
+    expect(script, "the argparse default must be the named ordinary settle window")
+      .toMatch(/--settle-seconds"[^)]*default=DEFAULT_SETTLE_SECONDS/s)
+    expect(script, "the script must own the 300s settle default").toMatch(/^DEFAULT_SETTLE_SECONDS = 300\.0$/m)
     // No prose may reintroduce the bots-present pre-widening rule the wake protocol replaced.
     expect(babysit).not.toMatch(/whenever the repo uses review bots/i)
   })
 
-  test("settle policy: an incomplete review lifecycle gets a 15-minute floor and 30-minute ceiling", async () => {
-    const [babysit, script] = await Promise.all([readRepoFile(BABYSIT), readRepoFile(PR_SNAPSHOT)])
-    expect(babysit).toContain("incomplete review lifecycle")
-    expect(babysit).toContain("15 minutes")
-    expect(babysit).toContain("30 minutes")
-    expect(babysit).toMatch(/trajectory.*extend/i)
-    expect(babysit).toMatch(/never.*shorten/i)
-    expect(babysit).toMatch(/must not re-arm.*same unchanged signal/i)
-    expect(babysit).toMatch(/unattributed lifecycle incomplete/i)
-    expect(babysit).toMatch(/reviewer when identifiable.*observed signal/i)
-    expect(babysit).toMatch(/only uncleared condition.*incomplete lifecycle.*15 quiet minutes.*30-minute terminal ceiling/i)
-    expect(script).toContain("review_signal_seen_on_head")
-    // A done signal on the current head must end the wait, not start another settle period.
-    expect(babysit).toContain("never extends the wait")
-    expect(babysit).toContain("no further settle period")
+  test("readiness gate: GitHub's mergeability is one conjunct, never the whole answer", async () => {
+    const babysit = await readBabysit()
+    // Two regimes in the wild: required checks make GitHub enforce mergeability, and advisory code
+    // review does not. The gate never asks which a repo is in — the first lands in GitHub's verdict
+    // and the second in its own conjuncts, so a PR GitHub would merge today is still not ready while
+    // feedback is outstanding. Pin that the review conjuncts survive any future restatement of the
+    // gate; nothing else fails if they are collapsed into the mergeable read.
+    expect(babysit).toMatch(/defers required-check and required-review policy to GitHub/i)
+    expect(babysit).toMatch(/counts\.threads == 0[^.]{0,80}counts\.comments == 0/)
+    expect(babysit).toMatch(/open_needs_human == 0/)
+    expect(babysit).toMatch(/zero actionable backlog/i)
+    // And the report may never upgrade "GitHub would let you" into "safe".
+    expect(babysit).toMatch(/your call to merge/i)
+  })
+
+  test("the boundary summary and the settle reference state the review gate identically", async () => {
+    // envelope.md and settle.md carry this paragraph in parity; fixing one and not the other is how
+    // a stale claim about a removed mechanism survived a repo-wide edit (#1611).
+    const [envelope, settle] = await Promise.all([
+      readRepoFile("skills/ce-babysit-pr/references/envelope.md"),
+      readRepoFile("skills/ce-babysit-pr/references/settle.md"),
+    ])
+    for (const doc of [envelope, settle]) {
+      expect(doc).toMatch(/gates only the \*merge-ready declaration\* — never the work/)
+      expect(doc).toMatch(/engine reports only that the PR went quiet/i)
+      expect(doc).not.toMatch(/review_in_progress|review_signal_/)
+    }
+    // The on-disk state contract is read as authoritative by a runtime agent, so a removed field
+    // lingering in its example still advertises detector state that no longer exists.
+    const watchLoop = await readRepoFile("skills/ce-babysit-pr/references/watch-loop.md")
+    for (const doc of [watchLoop]) {
+      expect(doc).not.toMatch(/"review_in_progress"|"review_signal_/)
+    }
+  })
+
+  test("settle policy: readiness judges whether a review is still coming, and bounds the wait", async () => {
+    const babysit = await readBabysit()
+    // The engine reports quiet; the agent decides whether a review is on its way. Pinning the
+    // asymmetry and the bound, not a state vocabulary — the 15/30-minute lifecycle machinery this
+    // replaced generated every defect in #1611 by making the engine re-decide it (#1606).
+    expect(babysit).toMatch(/has told you it \*\*started\*\*/i)
+    expect(babysit).toMatch(/not evidence that work continues/i)
+    expect(babysit).toMatch(/reached a terminal conclusion means it stopped/i)
+    expect(babysit).toMatch(/never read a timeout or a skip as approval/i)
+    // Terminal work only ends the wait when it accounts for the review that was announced —
+    // an app can finish an unrelated check while its review has not appeared.
+    expect(babysit).toMatch(/accounts for the review it announced/i)
+    expect(babysit).toMatch(/is not the review finishing/i)
+    // Absence never blocks terminally, and the wait is bounded rather than open-ended.
+    expect(babysit).toMatch(/never wait terminally for a done signal/i)
+    // An announcement is not the only evidence a review is coming. Dropping the earlier-head sign
+    // makes the gate inert in repos where no reviewer announces — which is most of them.
+    expect(babysit).toMatch(/reviewed an \*\*earlier\*\* head and not this one/i)
+    expect(babysit).toMatch(/without ever announcing anything/i)
+    expect(babysit).toMatch(/wait a bounded while/i)
+    // The bound needs a magnitude, not just a count of re-arms.
+    expect(babysit).toMatch(/no more than 1800/i)
+    expect(babysit).toMatch(/never re-arm past it on the same unchanged evidence/i)
+    expect(babysit).toMatch(/say plainly what you could not confirm/i)
+    // Readiness stays a recommendation.
+    expect(babysit).toMatch(/never authorization to merge/i)
+    // ...but not as an absolute: SKILL.md already excepts stack-land, where selecting the posture
+    // was the user's advance yes and a settled prefix does land. A local absolute here contradicts
+    // the always-loaded body and mis-states what an early call costs in that posture.
+    expect(babysit).toMatch(/except under `posture:stack-land`/i)
+    expect(babysit).toMatch(/costs landing sooner than the reviewer finished/i)
+    // Omitting the flag on a re-arm is not a smaller wait, it re-fires on the next poll.
+    expect(babysit).toMatch(/passing it is what makes the re-arm real/i)
   })
 
   test("watcher silence is defined as no-information, with a fresh snapshot for mid-watch status asks", async () => {
     // Regression guard: an agent narrated detector silence as "review still active"; silence only
     // means no wake condition has fired.
-    const babysit = await readRepoFile(BABYSIT)
+    const babysit = await readBabysit()
     expect(babysit).toContain("Watcher silence carries no PR-state information")
     expect(babysit, "a mid-watch status ask must be answered from a fresh snapshot").toMatch(
       /asks for status before a wake.*fresh `snapshot`/s,
@@ -244,14 +362,14 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
   test("live updates report PR state without leaking routine watcher mechanics", async () => {
     // Regression guard: progress narration led with a wake race and re-arm details instead of the
     // user-relevant outcome (feedback already addressed; CI still running).
-    const babysit = await readRepoFile(BABYSIT)
+    const babysit = await readBabysit()
     expect(babysit).toContain("PR state first in live updates")
     expect(babysit).toMatch(/wake, snapshot, re-arm, or head as internal implementation detail/)
     expect(babysit).toMatch(/only when they explain a failure or required user action/)
   })
 
   test("authority boundary: babysit never merges; readiness is reported as the user's call", async () => {
-    const babysit = await readRepoFile(BABYSIT)
+    const babysit = await readBabysit()
     expect(babysit).toMatch(/\*\*never\*\* merges the PR/i)
     expect(babysit).toContain("looks ready — your call")
     expect(babysit).toMatch(/never .safe to merge./)
@@ -260,7 +378,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
 
   test("stack-aware routing is automatic, CLI-first, and never uses checkout as a probe", async () => {
     const [babysit, watchLoop, script] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile("skills/ce-babysit-pr/references/watch-loop.md"),
       readRepoFile(PR_SNAPSHOT),
     ])
@@ -282,7 +400,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
   })
 
   test("managed and manual dependency chains have distinct currency and readiness contracts", async () => {
-    const babysit = await readRepoFile(BABYSIT)
+    const babysit = await readBabysit()
     expect(babysit).toMatch(/managed stack[\s\S]{0,1600}pre-existing target staleness[^.]{0,180}never this route/i)
     expect(babysit).toMatch(/ready as the next PR in the stack/i)
     expect(babysit).toMatch(/manual dependency chain/i)
@@ -293,7 +411,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
 
   test("a target push in a confirmed managed stack is followed by recoverable upstack maintenance", async () => {
     const [babysit, watchLoop] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile("skills/ce-babysit-pr/references/watch-loop.md"),
     ])
 
@@ -315,7 +433,8 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
   })
 
   test("managed-stack mutation records a pre-push baseline instead of stopping for unproven atomicity", async () => {
-    const babysit = await readRepoFile(BABYSIT)
+    // The full ordering invariant lives in tick.md; the body carries the same order as a bare list.
+    const babysit = await readRepoFile("skills/ce-babysit-pr/references/tick.md")
     const terminal = babysit.indexOf("1. **Terminal check first.**")
     const baseline = babysit.indexOf("**Managed-stack pre-push baseline.**")
     const feedback = babysit.indexOf("3. **Feedback before CI.**")
@@ -337,7 +456,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
 
   test("post-push re-probe compares dependents against baseline, not the pushed target OID", async () => {
     const [babysit, watchLoop] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile(WATCH_LOOP),
     ])
     for (const text of [babysit, watchLoop]) {
@@ -348,7 +467,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
 
   test("stack-land waits for actual MERGED after merge-queue enqueue", async () => {
     const [babysit, stackCommands] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile("skills/ce-babysit-pr/references/stack-commands.md"),
     ])
     expect(babysit).toMatch(/merge-queue[\s\S]{0,200}enqueue[\s\S]{0,200}OPEN/i)
@@ -358,7 +477,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
 
   test("user-facing resume commands render for the active host", async () => {
     const [babysit, watchLoop] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile(WATCH_LOOP),
     ])
 
@@ -375,7 +494,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
 
   test("sequential babysitting is a confirmed-managed-stack-only, one-watcher scope", async () => {
     const [babysit, watchLoop] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile("skills/ce-babysit-pr/references/watch-loop.md"),
     ])
 
@@ -394,7 +513,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
 
   test("posture enum and stack-land merge carve-out are load-bearing", async () => {
     const [babysit, commands, watchLoop] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile("skills/ce-babysit-pr/references/stack-commands.md"),
       readRepoFile(WATCH_LOOP),
     ])
@@ -422,7 +541,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
 
   test("managed-stack continuation preserves one fixed invocation budget", async () => {
     const [babysit, watchLoop] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile("skills/ce-babysit-pr/references/watch-loop.md"),
     ])
 
@@ -436,9 +555,10 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
   })
 
   test("mark writes are fenced by the active invocation tuple", async () => {
-    const [babysit, watchLoop, script] = await Promise.all([
-      readRepoFile(BABYSIT),
+    const [babysit, watchLoop, tick, script] = await Promise.all([
+      readBabysit(),
       readRepoFile("skills/ce-babysit-pr/references/watch-loop.md"),
+      readRepoFile("skills/ce-babysit-pr/references/tick.md"),
       readRepoFile(PR_SNAPSHOT),
     ])
     for (const text of [babysit, watchLoop]) {
@@ -446,12 +566,43 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
     }
     expect(script).toMatch(/m\.add_argument\("--invocation-id", required=True/)
     expect(script).toMatch(/def cmd_mark\(args\):[\s\S]{0,180}_apply_invocation\(box, args, now\)/)
+
+    const answerStart = tick.indexOf("When the user answers")
+    const answerEnd = tick.indexOf("The next snapshot", answerStart)
+    const answerBlock = tick.slice(answerStart, answerEnd)
+    const command = answerBlock.indexOf('"$PY" "$SKILL_DIR/scripts/pr-snapshot" mark')
+    expect(answerStart).toBeGreaterThan(-1)
+    expect(answerEnd).toBeGreaterThan(answerStart)
+    expect(command).toBeGreaterThan(-1)
+    for (const assignment of [
+      'SKILL_DIR="',
+      'SCRATCH_ROOT="',
+      'STATE_DIR="',
+      'RUN_INVOCATION_ID="',
+      'RUN_STARTED_AT="',
+      'RUN_BUDGET_SECONDS="',
+      'PY="',
+    ]) {
+      const initializedAt = answerBlock.indexOf(assignment)
+      expect(initializedAt, `${assignment} must be initialized in the answer recipe`).toBeGreaterThan(-1)
+      expect(initializedAt, `${assignment} must be initialized before the answer mark`).toBeLessThan(command)
+    }
+    expect(answerBlock).toContain('/tmp/compound-engineering-$(id -u)')
+    expect(answerBlock).toContain('${TMPDIR:-/tmp}/compound-engineering-$(id -u)')
+    expect(answerBlock).toContain('ce-babysit-pr/<host>-<owner>-<repo>-<N>')
+    expect(answerBlock).toContain("for c in python3 python py")
+    expect(answerBlock).toMatch(/read-only prohibits executing[^.]+not rendering/i)
+    expect(answerBlock).toMatch(/read-only run[^.]+return the literal command[^.]+sole pending transition/i)
+    expect(answerBlock).toMatch(/exact known values[^.]+explicit placeholders[^.]+invocation metadata[^.]+answer-file path/i)
+    expect(answerBlock).toMatch(/literal `--answer-decision` and `--answer-file` flags/i)
+    expect(answerBlock).toMatch(/prose paraphrase[^.]+in-memory state move[^.]+incomplete/i)
   })
 
   test("blocked approval drains review automatically before a bounded handback", async () => {
-    const babysit = await readRepoFile(BABYSIT)
+    const babysit = await readBabysit()
     expect(babysit).toContain("blocked-external-drained")
     expect(babysit).toContain("--blocked-external-drain-seconds")
+    // The drain keeps its own tiers; they are independent of the removed review-signal lifecycle.
     for (const bound of ["300", "900", "1800"]) expect(babysit).toContain(bound)
     expect(babysit).toMatch(/without asking|do not ask/i)
     expect(babysit).toMatch(/pipeline[^.]{0,300}(terminate|return)/i)
@@ -459,7 +610,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
 
   test("deadline precedence preserves stop results without starting another work round", async () => {
     const [babysit, watchLoop] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile("skills/ce-babysit-pr/references/watch-loop.md"),
     ])
     for (const text of [babysit, watchLoop]) {
@@ -469,11 +620,11 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
 
   test("pipeline success requires clean chain currency in both loaded contracts", async () => {
     const [babysit, watchLoop] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile(WATCH_LOOP),
     ])
-    const pipelineStart = babysit.indexOf("2. **Bounded stop, not merge-ready.**")
-    const pipelineEnd = babysit.indexOf("3. **Native residual surfacing", pipelineStart)
+    const pipelineStart = babysit.indexOf("3. **Bounded stop, derived from that set.**")
+    const pipelineEnd = babysit.indexOf("## Pipeline stop", pipelineStart)
     const pipelineDelta = babysit.slice(pipelineStart, pipelineEnd)
 
     for (const text of [babysit, watchLoop]) {
@@ -482,13 +633,83 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
     }
     expect(pipelineStart).toBeGreaterThan(-1)
     expect(pipelineEnd).toBeGreaterThan(pipelineStart)
-    expect(pipelineDelta).toMatch(/`all_checks_ok`[\s\S]{0,260}`mergeability_certain`[\s\S]{0,160}`merge_state_status == "CLEAN"`[\s\S]{0,260}`stack_blocker`[\s\S]{0,160}`branch_currency_blocker`[^.]{0,80}(null|clear)/i)
+    expect(babysit).toMatch(/`all_checks_ok`[\s\S]{0,260}`mergeability_certain`[\s\S]{0,160}`merge_state_status == "CLEAN"`[\s\S]{0,260}`stack_blocker`[\s\S]{0,160}`branch_currency_blocker`[^.]{0,80}(null|clear)/i)
     expect(pipelineDelta).toMatch(/open\/claimed\/parked current currency item[^.]{0,240}residual/i)
+  })
+
+  test("needs-human cannot become a successful handoff before its decision payload reaches the coordinator", async () => {
+    const [resolverRubric, resolverPipeline, debugPipeline, babysitPipeline, babysitWatch, babysitTick, babysitSettle, babysitReport, commitPush, lfg] =
+      await Promise.all([
+        readRepoFile(CERESOLVE_RUBRIC),
+        readRepoFile(CERESOLVE_PIPELINE),
+        readRepoFile(CEDEBUG_PIPELINE),
+        readRepoFile("skills/ce-babysit-pr/references/pipeline.md"),
+        readRepoFile(WATCH_LOOP),
+        readRepoFile("skills/ce-babysit-pr/references/tick.md"),
+        readRepoFile("skills/ce-babysit-pr/references/settle.md"),
+        readRepoFile("skills/ce-babysit-pr/references/report.md"),
+        readRepoFile(COMMIT_PUSH_HANDOFF),
+        readRepoFile(LFG_SHIPPING_TAIL),
+      ])
+
+    expect(resolverRubric).toContain('type: "needs-human"')
+    for (const field of NEEDS_HUMAN_RESIDUAL_FIELDS) {
+      expect(resolverRubric, `resolver schema must define '${field}'`).toContain(field)
+      expect(resolverPipeline, `resolver pipeline must return '${field}'`).toContain(field)
+    }
+    expect(resolverPipeline).toMatch(/thread_urls[^.]{0,180}(every|all)[^.]{0,120}(open|still-open)/i)
+    expect(resolverPipeline).toMatch(/leave[^.]{0,100}(thread|threads)[^.]{0,100}open/i)
+    expect(resolverRubric).toContain("sources:")
+    expect(resolverRubric).toMatch(/kind: "[^"]*currency[^"]*"/i)
+    expect(resolverPipeline).toMatch(/sources[^.]{0,180}(every|all)[^.]{0,180}(thread|comment|review)/i)
+    expect(debugPipeline).toContain('"kind": "check"')
+    expect(debugPipeline).toContain('"kind": "thread"')
+    expect(debugPipeline).toContain('"type": "needs-human"')
+    expect(debugPipeline).toMatch(/sources[^.]{0,240}every item this one decision covers/i)
+    expect(debugPipeline).toMatch(/thread_urls[^.]{0,180}every owned open thread/i)
+
+    expect(babysitPipeline).toMatch(/success only when[^.]{0,500}`needs_human_residuals`[^.]{0,120}empty/i)
+    expect(babysitWatch).toMatch(/success only when[^.]{0,500}`needs_human_residuals`[^.]{0,120}empty/i)
+    expect(babysitPipeline).toContain('status: "needs-human"')
+    expect(babysitPipeline).toMatch(/residual[^.]{0,120}unchanged/i)
+    for (const text of [babysitPipeline, babysitWatch]) {
+      expect(text).toMatch(/(non-empty|not empty)[^.]{0,80}(canonical )?(set|`needs_human_residuals`)[^.]{0,240}no autonomous work(?: remains)?[^.]{0,240}status: "needs-human"|(canonical )?(set|`needs_human_residuals`)[^.]{0,180}(non-empty|not empty)[^.]{0,240}no autonomous work(?: remains)?[^.]{0,240}status: "needs-human"/i)
+      expect(text).toMatch(/(?:without|never) wait(?:ing)?[^.]{0,160}(human|budget)/i)
+    }
+    expect(babysitTick).toMatch(/immediately[^.]{0,180}`## Needs your decision`/i)
+    expect(babysitTick).toMatch(/preserve it unchanged/i)
+    expect(babysitTick).toContain("--residual-file")
+    expect(babysitTick).toContain("needs_human_residuals")
+    expect(babysitTick).toMatch(/never add a route-specific `needs-human` mark/i)
+    expect(babysitWatch).toContain("needs_human_residuals")
+    expect(babysitWatch).toContain("human_decisions")
+    expect(babysitWatch).toMatch(/observation changing or disappearing[^.]{0,180}invalidates/i)
+    expect(babysitWatch).toMatch(/remote activity[^.]{0,100}never[^.]{0,100}answer/i)
+    expect(babysitWatch).toContain("--answer-decision")
+    expect(babysitWatch).toContain("--answer-file")
+    expect(babysitWatch).toMatch(/legacy parked records[^.]{0,180}fail open/i)
+    expect(babysitWatch).toMatch(/interactive continuous mode[^.]{0,240}standing residual[^.]{0,240}watch continues/i)
+    expect(babysitWatch).not.toMatch(/record each with `mark[^`]*--disposition needs-human`/i)
+    expect(babysitSettle).toMatch(/shared atomic mark/i)
+    expect(babysitSettle).not.toMatch(/`--disposition needs-human`/i)
+    expect(babysitWatch).toMatch(/kind: "currency"/i)
+    expect(babysitReport).toContain("## Needs your decision")
+    for (const field of NEEDS_HUMAN_RESIDUAL_FIELDS) {
+      expect(babysitReport, `babysit report must render '${field}'`).toContain(field)
+    }
+
+    for (const [name, consumer] of [["ce-commit-push-pr", commitPush], ["lfg", lfg]] as const) {
+      expect(consumer, `${name} must render the decision gate`).toContain("## Needs your decision")
+      expect(consumer, `${name} must preserve the typed residual`).toMatch(/needs-human[^.]{0,240}unchanged/i)
+      expect(consumer, `${name} must gate success/DONE on propagation`).toMatch(/before[^.]{0,240}(success|DONE)/i)
+    }
+    expect(lfg).toMatch(/common result gate/i)
+    expect(lfg).toMatch(/whichever handoff produced the result/i)
   })
 
   test("merge identity distinguishes historical base metadata from current-base readiness and branch currency", async () => {
     const [babysit, watchLoop, script] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile(WATCH_LOOP),
       readRepoFile("skills/ce-babysit-pr/scripts/pr-snapshot"),
     ])
@@ -510,7 +731,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
   })
 
   test("branch-currency mutation is claimed, invocation-fenced, and reconciled before retry", async () => {
-    const [babysit, watchLoop] = await Promise.all([readRepoFile(BABYSIT), readRepoFile(WATCH_LOOP)])
+    const [babysit, watchLoop] = await Promise.all([readBabysit(), readRepoFile(WATCH_LOOP)])
     for (const text of [babysit, watchLoop]) {
       expect(text).toContain("--currency-key")
       expect(text).toContain("--currency-disposition claimed")
@@ -520,6 +741,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
       expect(text).toMatch(/claimed[^.]{0,180}reconciliation-only/i)
       expect(text).toMatch(/exactly one retry[^.]{0,260}(proven|conclusive)[^.]{0,180}no[- ]mutation[^.]{0,180}backoff/i)
       expect(text).toMatch(/ambiguous[^.]{0,220}never[^.]{0,160}(retry|resubmit)/i)
+      expect(text).toMatch(/terminal currency result[^.]{0,160}no safe autonomous continuation[^.]{0,220}`--residual-file`/i)
     }
     expect(babysit).toMatch(/stale invocation[^.]{0,220}(reject|invalidate)/i)
     expect(babysit).toMatch(/SKILL_DIR=[^\n]+;[^\n]+STATE_DIR=[^\n]+;[^\n]+RUN_INVOCATION_ID=[^\n]+;[^\n]+RUN_STARTED_AT=[^\n]+;[^\n]+RUN_BUDGET_SECONDS=[^\n]+;\n\s*PY=[\s\S]*?"\$PY"[^\n]+--currency-disposition claimed/i)
@@ -527,7 +749,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
   })
 
   test("behind maintenance uses positive host capability and exact observed OIDs", async () => {
-    const [babysit, watchLoop] = await Promise.all([readRepoFile(BABYSIT), readRepoFile(WATCH_LOOP)])
+    const [babysit, watchLoop] = await Promise.all([readBabysit(), readRepoFile(WATCH_LOOP)])
     const behindStart = babysit.indexOf('- **`BEHIND`: host-owned update only.**')
     const behindEnd = babysit.indexOf('- **`DIRTY`: exact-base local repair only.**', behindStart)
     const behindBlock = babysit.slice(behindStart, behindEnd)
@@ -550,7 +772,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
   })
 
   test("dirty maintenance proves push authority, previews exact-base conflicts, and parks semantic choices", async () => {
-    const [babysit, watchLoop] = await Promise.all([readRepoFile(BABYSIT), readRepoFile(WATCH_LOOP)])
+    const [babysit, watchLoop] = await Promise.all([readBabysit(), readRepoFile(WATCH_LOOP)])
     for (const text of [babysit, watchLoop]) {
       expect(text).toMatch(/DIRTY[\s\S]{0,500}host_branch_update_capability[^.]{0,120}(irrelevant|does not apply)/i)
       expect(text).toMatch(/ordinary direct[- ]push authority[^.]{0,180}(exact )?head ref/i)
@@ -572,9 +794,13 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
   })
 
   test("semantic currency parks are fingerprinted before a new mutation and scope stays target-local", async () => {
-    const [babysit, watchLoop] = await Promise.all([readRepoFile(BABYSIT), readRepoFile(WATCH_LOOP)])
+    const [babysit, watchLoop] = await Promise.all([readBabysit(), readRepoFile(WATCH_LOOP)])
     for (const text of [babysit, watchLoop]) {
       expect(text).toMatch(/parked_semantic_fingerprints[\s\S]{0,500}--currency-inspected-fingerprint/i)
+      expect(text).toContain("--answer-decision")
+      expect(text).toContain("--answer-file")
+      expect(text).not.toContain("--currency-answered-fingerprint")
+      expect(text).not.toContain("--currency-answer-file")
       expect(text).toMatch(/unchanged[^.]{0,160}(park|needs-human)[^.]{0,160}(changed|different)[^.]{0,180}(reopen|retire)/i)
       expect(text).toMatch(/manual dependenc/i)
       expect(text).toContain("target-local")
@@ -592,7 +818,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
     // locations, and the fixer's mutation boundary. Dropping either side silently reverts to
     // one-site-per-round (babysit routes a request nothing fulfills, or the resolver never sweeps).
     const [babysit, watchLoop, fullMode, rubric, fixer] = await Promise.all([
-      readRepoFile(BABYSIT),
+      readBabysit(),
       readRepoFile("skills/ce-babysit-pr/references/watch-loop.md"),
       readRepoFile(CERESOLVE_FULL_MODE),
       readRepoFile("skills/ce-resolve-pr-feedback/references/evaluation-rubric.md"),
@@ -611,7 +837,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
     // A calling skill's auto-handoff (ce-commit-push-pr post-PR) must not count as the user
     // explicitly naming a draft; only a human's invocation or an explicit watch-mode token may
     // arm a watch on one.
-    const babysit = await readRepoFile(BABYSIT)
+    const babysit = await readBabysit()
     const boundary = babysit.match(/\*\*Draft PRs are opt-in\.\*\*[\s\S]+?(?=\n-)/)?.[0]
     expect(boundary).toBeDefined()
     expect(boundary).toContain("A calling skill's automatic handoff is neither")
@@ -630,8 +856,7 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
   test("stop summaries open with a pinned status line and carry a counted run recap", async () => {
     // Observed drift: merge-ready stops reported only current PR state (CI green, no threads),
     // burying the ready call in prose and dropping the hour of resolved feedback/CI work entirely.
-    const babysit = await readRepoFile(BABYSIT)
-    const step4 = babysit.match(/## Step 4: Report \/ summary([\s\S]+?)## Step 5:/)?.[1]
+    const step4 = await readRepoFile("skills/ce-babysit-pr/references/report.md")
     expect(step4).toBeDefined()
     // Ready declarations are pinned to the two ready emoji; merged celebrates distinctly.
     expect(step4).toContain("✅ Looks merge-ready")
@@ -643,5 +868,78 @@ describe("ce-babysit-pr cross-skill contract parity", () => {
     expect(step4).toContain("A run recap at every true stop")
     expect(step4).toMatch(/never from conversation memory alone/)
     expect(step4).toContain("remote record")
+    expect(step4).toMatch(/`ACTIONS` trailer[^.]{0,160}only mutations actually performed or observed this tick/i)
+    expect(step4).toMatch(/planned, next, or pending transitions[^.]{0,160}never count as actions/i)
+  })
+})
+
+describe("ce-babysit-pr always-loaded body pins", () => {
+  // These rules must control behavior without a reference read: they are the ones an agent
+  // acting on an event (a sibling PR merged, a coordinator said "update the branch") or a stale
+  // merge computation gets wrong. Incident: two CLEAN PRs received origin/main merges, one pushed,
+  // restarting green CI, while the currency rule sat only in long paragraphs.
+  test("body fits Codex's 8000-byte prompt budget (CRLF-adjusted)", async () => {
+    const body = await readRepoFile(BABYSIT_BODY)
+    const crlfAdjusted = Buffer.byteLength(body, "utf8") + body.split("\n").length - 1
+    expect(crlfAdjusted).toBeLessThanOrEqual(8000)
+  })
+
+  test("branch currency is consumption-only and the description does not advertise base movement", async () => {
+    const body = await readRepoFile(BABYSIT_BODY)
+    const description = body.match(/^description:\s*"([^"]*)"/m)?.[1] ?? ""
+    expect(description).not.toMatch(/base movement/i)
+    expect(body).toMatch(/Branch currency is consumption-only/)
+    expect(body).toMatch(/only for the exact `branch_currency` item the snapshot emitted/)
+    expect(body).toMatch(/`BEHIND`, `DIRTY`, a branch-protection requirement, or an explicit always-current policy/)
+    expect(body).toMatch(/Never infer an item from[^.]*base movement[^.]*sibling PR merging[^.]*`CLEAN`\/`MERGEABLE`[^.]*`BLOCKED`[^.]*"update the branch"/)
+    expect(body).toMatch(/push that restarts green CI without a claimed item is a defect/)
+    expect(body).toMatch(/`update-branch` with `expected_head_sha`, never a local merge/)
+    expect(body).toMatch(/no item → nothing/)
+  })
+
+  test("authority is bounded upward as well as downward", async () => {
+    const body = await readRepoFile(BABYSIT_BODY)
+    expect(body).toMatch(/never by prose, events you notice, or a coordinator's/)
+    expect(body).toMatch(/Upward: a coordinator supplies target, posture, budget, mode — never a mutation the snapshot does not call for/)
+    expect(body).toMatch(/"update the branch" with no item is a broaden, not a narrow/)
+    expect(body).toMatch(/exclusions = merge[^;]*rebase, force-push, approve-CI, unrequested branch update/)
+    expect(body).toMatch(/Merge-readiness is never merge authorization/)
+  })
+
+  test("stack traversal advances on quiescence with a downstack probe; landing still requires settled", async () => {
+    const body = await readRepoFile(BABYSIT_BODY)
+    const stack = await readRepoFile("skills/ce-babysit-pr/references/stack.md")
+    const script = await readRepoFile(PR_SNAPSHOT)
+    // Body: the posture line states the condition (zero actionable backlog, CI may run) and the safety half.
+    expect(body).toMatch(/`stack-ready` — once a layer has zero actionable backlog \(CI may still run\)[^\n]*lower layers stay probed[^\n]*never merges/)
+    expect(body).toMatch(/`stack-land`[^\n]*bottom-most open layer is settled/)
+    // stack.md owns the mechanism: quiescence definition, the watcher flag, the wake, the return rule, and the landing gate.
+    expect(stack).toMatch(/quiescent[^|]*zero actionable backlog[^|]*no standing residual[^|]*no open `needs-human`[^|]*`blocked-failing`[^|]*no open or claimed currency item[^|]*no delegate work in flight/)
+    expect(stack).toContain("--downstack-pr <N>")
+    expect(stack).toMatch(/wakes `downstack-actionable`/)
+    expect(stack).toMatch(/return to the \*\*lowest\*\* re-opened non-draft layer/)
+    expect(stack).toMatch(/Landing still requires \*\*settled\*\*, not merely quiescent/)
+    expect(stack).toMatch(/Never mutate two layers concurrently/)
+    // The script really has the flag and the wake reason.
+    expect(script).toContain('"--downstack-pr"')
+    expect(script).toContain('"downstack-actionable"')
+  })
+
+  test("the tick ordering and the always-on references are named in the body", async () => {
+    const body = await readRepoFile(BABYSIT_BODY)
+    const order = ["1. **Terminal check", "2. **Capture the head SHA", "3. **Feedback before CI", "4. **Stale-SHA cancellation", "5. **CI on the current head", "6. **Branch currency", "7. **Managed upstack maintenance"]
+    let last = -1
+    for (const step of order) {
+      const at = body.indexOf(step)
+      expect(at, step).toBeGreaterThan(last)
+      last = at
+    }
+    expect(body).toMatch(/Read `references\/tick.md` before the first snapshot/)
+    for (const ref of BABYSIT_REFERENCES) {
+      expect(body, ref).toContain(ref.replace("skills/ce-babysit-pr/", ""))
+    }
+    expect(body).toContain("Settled ≠ merged")
+    expect(body).toMatch(/never declare non-convergence yourself/)
+    expect(body).toMatch(/primary failure mode/)
   })
 })

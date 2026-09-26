@@ -6,10 +6,19 @@ async function readRepoFile(relativePath: string): Promise<string> {
   return readFile(path.join(process.cwd(), relativePath), "utf8")
 }
 
+function sliceSection(content: string, startAnchor: string, endAnchor: string): string {
+  const start = content.indexOf(startAnchor)
+  expect(start, `start anchor not found: ${startAnchor}`).toBeGreaterThanOrEqual(0)
+  const end = content.indexOf(endAnchor, start + startAnchor.length)
+  expect(end, `end anchor not found: ${endAnchor}`).toBeGreaterThan(start)
+  return content.slice(start, end)
+}
+
 async function readCeWorkImplementationContract(): Promise<string> {
   const skill = await readRepoFile("skills/ce-work/SKILL.md")
   const implementationLoop = await readRepoFile("skills/ce-work/references/implementation-loop.md").catch(() => "")
-  return `${skill}\n${implementationLoop}`
+  const returnToCaller = await readRepoFile("skills/ce-work/references/return-to-caller.md").catch(() => "")
+  return `${skill}\n${implementationLoop}\n${returnToCaller}`
 }
 
 describe("ce-work review contract", () => {
@@ -29,19 +38,20 @@ describe("ce-work review contract", () => {
     expect(shipping).toContain("ce-simplify-code")
     expect(shipping).toContain("3. **Code Review**")
 
-    // Single portable path: ce-code-review self-sizes (lite vs full roster).
+    // Single portable path: ce-code-review self-sizes. Callers do not classify.
     // The former Tier 1 (harness-native /review) / Tier 2 (escalation) split is gone,
     // along with harness-specific review detection.
     expect(shipping).toContain("ce-code-review")
     expect(shipping).toContain("as the single path")
+    expect(shipping).toContain("Do not classify lite versus full")
     expect(shipping).not.toContain("**Tier 1 -- harness-native review")
     expect(shipping).not.toContain("(escalation only)")
     // Skip only for a purely mechanical diff; everything else is reviewed
     expect(shipping).toContain("mechanical diff")
     // The one escalation signal ce-code-review cannot infer is passed explicitly
     expect(shipping).toContain("depth:full")
-    // Autonomous Residual Gate branch keeps unattended pipelines unblocked
-    expect(shipping).toContain("Non-interactive / autonomous")
+    // Missing authority stays blocked in unattended pipelines.
+    expect(shipping).toContain("Autonomous runs return the blocker")
     // Two-step review -> fix, consumed by followup
     expect(shipping).toContain("review-findings-followup.md")
     expect(shipping).toMatch(/review is not fix|3a\. Review|3b\. Apply/i)
@@ -52,30 +62,53 @@ describe("ce-work review contract", () => {
     expect(shipping).toContain("Ship-handoff gate")
   })
 
+  // Hosts such as Grok register a bundled skill named `review`. Headings like
+  // "invoke review" and slash examples like `/review` caused sibling-path reads of
+  // this plugin's skills/review/SKILL.md, which does not exist.
+  test("orchestration names ce-code-review, not a host skill named review", async () => {
+    const lfg = await readRepoFile("skills/lfg/SKILL.md")
+    const followup = await readRepoFile("skills/lfg/references/review-followup.md")
+    const shipping = await readRepoFile("skills/ce-work/references/shipping-workflow.md")
+    const findings = await readRepoFile(
+      "skills/ce-work/references/review-findings-followup.md",
+    )
+
+    expect(followup).toContain("## Step 4 — invoke `ce-code-review`")
+    expect(followup).not.toContain("invoke review")
+    expect(followup).toContain("host catalog's listed path")
+    expect(followup).toContain("skills/review/SKILL.md")
+    expect(findings).toContain("invoke `ce-code-review` only for cold callers")
+    expect(findings).not.toContain("invoke review only")
+    expect(shipping).toContain("A host catalog entry named `review` is not this step")
+    expect(shipping).not.toMatch(/`\/review`/)
+    expect(shipping).toContain("use that entry's listed path")
+    expect(lfg).toContain("available-skills list")
+  })
+
   // Issue #1351: prose-only review mandate was silently skipped. The always-loaded
-  // SKILL.md surface must carry a done-condition (receipt or fixed skip phrase),
-  // not only a "remember to invoke" stub that defers all enforcement to a lazy ref.
+  // body owns the completion predicate; the required shipping owner owns receipt and
+  // fallback mechanics, including the exact phrases and mechanical exclusions.
   test("standalone shipping has an always-loaded code-review completion gate", async () => {
     const content = await readRepoFile("skills/ce-work/SKILL.md")
     const shipping = await readRepoFile("skills/ce-work/references/shipping-workflow.md")
+    const unavailableBranch = sliceSection(
+      shipping,
+      "**If the top-level `ce-code-review` attempt cannot produce a completed receipt:**",
+      "4. **Residual Work Gate**",
+    )
+    const reviewSummaryStart = shipping.indexOf("## Code Review")
+    expect(reviewSummaryStart, "Code Review summary anchor not found").toBeGreaterThanOrEqual(0)
+    const reviewSummary = shipping.slice(reviewSummaryStart)
 
     // Always-loaded body owns the gate (not only the lazy reference)
     expect(content).toContain("Code-review completion gate")
     expect(content).toContain("not done")
-    expect(content).toContain("must not call `ce-commit-push-pr`")
-    expect(content).toContain("artifact_path")
-    expect(content).toContain("status: complete")
-    expect(content).toContain("Code review: skipped (mechanical diff)")
-    expect(content).toContain("Code review: skipped (ce-code-review unavailable)")
-    expect(content).toContain("Code review: harness-native fallback")
-    // Mechanical exclusion of the observed self-justification; multi-file alone is not enough
-    expect(content).toContain("applying external/prior review findings")
-    expect(content).toContain("multi-file mechanical-only")
-    // Named non-substitutes
+    expect(content).toContain("must not call a commit or shipping skill")
+    expect(content).toContain("actual completed `ce-code-review` receipt")
+    expect(content).toContain("exact authorized skip states")
     expect(content).toContain("Never substitute")
     expect(content).toContain("mental self-review")
-    // Standalone-only; return-to-caller keeps caller-owned review
-    expect(content).toContain("does **not** apply in Return-to-Caller Mode")
+    expect(content).toContain("does not apply in Return-to-Caller Mode")
 
     // Reference mirrors gate + ship-handoff bind + mechanical exclusions
     expect(shipping).toContain("Completion gate (standalone shipping)")
@@ -86,7 +119,15 @@ describe("ce-work review contract", () => {
     expect(shipping).toContain("Code review: skipped (mechanical diff)")
     expect(shipping).toContain("Code review: skipped (ce-code-review unavailable)")
     expect(shipping).toContain("Code review: harness-native fallback")
+    expect(shipping).toContain("multi-file mechanical-only")
     expect(shipping).toContain("Never substitute")
+    // The caller decides only from the owning boundary: definition load or the
+    // terminal top-level receipt. Internal review events cannot authorize fallback.
+    for (const section of [unavailableBranch, reviewSummary]) {
+      expect(section).toContain("intermediate internal events never establish caller-owned unavailability")
+      expect(section).toContain("A missing dedicated runner, executable, or binary is not evidence")
+    }
+    expect(unavailableBranch).toContain("proceed through 3a and let `ce-code-review` own its recovery")
   })
 
   test("delegates commit and PR to dedicated skills", async () => {
@@ -195,7 +236,9 @@ describe("ce-brainstorm review contract", () => {
 
 describe("ce-plan testing contract", () => {
   test("flags blank test scenarios on feature-bearing units as incomplete", async () => {
-    const content = await readRepoFile("skills/ce-plan/SKILL.md")
+    // Phase 5.1's review checklist moved into the reference ce-plan's body names
+    // as a required read before the plan is written (#1412 restructure).
+    const content = await readRepoFile("skills/ce-plan/references/final-review.md")
 
     // Phase 5.1 review checklist addresses blank test scenarios
     expect(content).toContain("blank or missing test scenarios")
@@ -206,7 +249,13 @@ describe("ce-plan testing contract", () => {
   })
 
   test("keeps execution direction natural-language instead of enum-based", async () => {
-    const content = await readRepoFile("skills/ce-plan/SKILL.md")
+    // The core principle and the per-unit Execution note field moved into the
+    // references ce-plan's body names as required reads (#1412 restructure);
+    // the rule is pinned across both so it cannot be dropped in either.
+    const content =
+      (await readRepoFile("skills/ce-plan/references/intake.md")) +
+      (await readRepoFile("skills/ce-plan/references/research.md")) +
+      (await readRepoFile("skills/ce-plan/references/structure.md"))
 
     expect(content).toContain("natural-language signal")
     expect(content).toContain("Do not encode it as a finite enum")
@@ -247,19 +296,8 @@ describe("verification_evidence seam parity (ce-work <-> lfg)", () => {
     { fact: "deliberate exception", ceWork: "exception reason", lfg: "deliberate test exception" },
   ]
 
-  function sliceSection(content: string, startAnchor: string, endAnchor: string): string {
-    const start = content.indexOf(startAnchor)
-    expect(start, `start anchor not found: ${startAnchor}`).toBeGreaterThanOrEqual(0)
-    const end = content.indexOf(endAnchor, start + startAnchor.length)
-    expect(end, `end anchor not found: ${endAnchor}`).toBeGreaterThan(start)
-    return content.slice(start, end)
-  }
-
   test("ce-work return contract owns the verification_evidence field and gates completion on it", async () => {
-    const content = await readRepoFile("skills/ce-work/SKILL.md")
-    // Scope to the Return-to-Caller "Return:" contract, not the whole file — the
-    // field must be documented in the return the caller actually reads.
-    const returnBlock = sliceSection(content, "## Return-to-Caller Mode", "Engine selection (")
+    const returnBlock = await readRepoFile("skills/ce-work/references/return-to-caller.md")
 
     for (const { fact, ceWork } of EVIDENCE_FACTS) {
       expect(returnBlock, `ce-work return contract must document ${fact} ("${ceWork}")`).toContain(ceWork)
@@ -273,30 +311,21 @@ describe("verification_evidence seam parity (ce-work <-> lfg)", () => {
   })
 
   test("lfg step-2 gate names every evidence fact ce-work documents", async () => {
-    const lfg = await readRepoFile("skills/lfg/SKILL.md")
-    // Scope to the step-2 gate block, between invoking ce-work and step 3.
-    const gate = sliceSection(
-      lfg,
-      "2. Invoke the `ce-work` skill with `mode:return-to-caller",
-      "3. Invoke the `ce-simplify-code`"
-    )
+    // The gate's field-level contract lives in the reference lfg's step 2 names as a
+    // required read before accepting a return; the body keeps the stop classes.
+    const gate = await readRepoFile("skills/lfg/references/work-return.md")
 
     for (const { fact, lfg: phrase } of EVIDENCE_FACTS) {
       expect(gate, `lfg gate must require ${fact} ("${phrase}")`).toContain(phrase)
     }
 
-    // The gate only demands evidence when behavior changed, and defers test-strategy to ce-work.
-    expect(gate).toContain("When `behavior_change: true`, also require `verification_evidence`")
+    // The field is always present; behavior-changing work makes its contents non-empty and specific.
+    expect(gate).toContain("When `behavior_change: true`, `verification_evidence` must name")
     expect(gate).toContain("Do NOT decide the test strategy inside LFG")
   })
 
   test("lfg retries ce-work exactly once for evidence, then blocks rather than ships", async () => {
-    const lfg = await readRepoFile("skills/lfg/SKILL.md")
-    const gate = sliceSection(
-      lfg,
-      "2. Invoke the `ce-work` skill with `mode:return-to-caller",
-      "3. Invoke the `ce-simplify-code`"
-    )
+    const gate = await readRepoFile("skills/lfg/references/work-return.md")
 
     // One-shot recovery on the same plan and engine binding, with the returned durable run id.
     expect(gate).toContain("invoke `ce-work` one more time in recovery mode")
@@ -312,8 +341,87 @@ describe("verification_evidence seam parity (ce-work <-> lfg)", () => {
   })
 })
 
+describe("missing-owner blocked seam parity (ce-plan/ce-work -> lfg)", () => {
+  test("every ce-plan owner blocker is structured and artifact presence suppresses retry", async () => {
+    const [cePlan, planBrief, lfg] = await Promise.all([
+      readRepoFile("skills/ce-plan/SKILL.md"),
+      readRepoFile("skills/lfg/references/plan-brief.md"),
+      readRepoFile("skills/lfg/SKILL.md"),
+    ])
+    const cePlanEnvelope = sliceSection(
+      cePlan,
+      "In pipeline mode, every required-reference failure returns",
+      "### Phase 0: Output, Resume, and Scope",
+    )
+    const lfgEnvelope = sliceSection(
+      planBrief,
+      "An explicit `status: blocked` return is terminal",
+      "Inspect the returned plan",
+    )
+    for (const field of ["`status: blocked`", "`phase`", "`blocker`", "`recovery_path`"]) {
+      expect(cePlanEnvelope).toContain(field)
+      expect(lfgEnvelope).toContain(field)
+    }
+    expect(cePlanEnvelope).toContain("include `artifact_path`")
+    expect(lfgEnvelope).toContain("`artifact_path`")
+    // 2026-08-21 eval (P9): a host that reads every phase owner at kernel load never re-reads the terminal owner,
+    // so the late-owner blocked path was unreachable on Claude; the kernel must say an early read does not count.
+    expect(cePlan).toContain("a read made before that phase does not satisfy it")
+    // Restated in plain language (2026-09); the pin guards the re-read condition, not the word "owner".
+    expect(cePlan).toContain("is read again at its step even when already in context")
+    expect(lfg).toContain("Blocked status outranks an existing artifact")
+    expect(lfg).toContain("If planning was invoked and returned neither a blocker nor a plan path")
+    // 2026-08-21 eval: a stale plan already under <root>/plans/ satisfied the gate once; the gate keys on the reported path.
+    expect(lfg).toContain("a plan file `ce-plan` reported writing this run")
+    expect(planBrief).toContain("the path `ce-plan` reported writing this run")
+  })
+
+  test("lfg decides a require-route fallback from the return, consistent with ce-work's producer contract", async () => {
+    // 2026-08-21 eval: ce-work (cross-model-execution.md) discloses and continues natively under `require`; the consumer
+    // used to say ce-work "must not fall back", which no return could satisfy. The stop is now keyed on the return fields.
+    const [workReturn, crossModel] = await Promise.all([
+      readRepoFile("skills/lfg/references/work-return.md"),
+      readRepoFile("skills/ce-work/references/cross-model-execution.md"),
+    ])
+    expect(crossModel).toContain("continue on the current harness and session model")
+    expect(workReturn).toContain("`implementation_engine_binding.mode` is `require` and whose `actual_route` differs from `requested_route` stops the pipeline as blocked")
+    expect(workReturn).not.toContain("must not prompt, fall back, or start native work")
+  })
+
+  test("the reduced ce-work blocker matches the authoritative field inventory", async () => {
+    const [ceWork, workReturn] = await Promise.all([
+      readRepoFile("skills/ce-work/SKILL.md"),
+      readRepoFile("skills/lfg/references/work-return.md"),
+    ])
+    const ceWorkSection = sliceSection(
+      ceWork,
+      "If that required read fails after planning or implementation created state",
+      "Do not erase partial state",
+    )
+    const lfgSection = sliceSection(
+      workReturn,
+      "## Missing-owner blocked return",
+      "## What each route outcome means",
+    )
+    const required = ["status: blocked", "plan_path", "run_id", "changed_state", "blockers", "recovery_path"]
+    for (const field of required) {
+      expect(ceWorkSection).toContain(field)
+      expect(lfgSection).toContain(field)
+    }
+    expect(lfgSection).toContain("valid terminal blocker")
+    expect(lfgSection).toContain("complete-return field inventory below does not apply")
+  })
+})
+
 describe("cross-model execution receipt seam parity (ce-work <-> lfg)", () => {
-  const ROUTE_RECEIPT_FIELDS = [
+  const COMPLETE_RETURN_FIELDS = [
+    "status",
+    "plan_path",
+    "changed_files",
+    "u_ids_attempted",
+    "u_ids_completed",
+    "verification_results",
+    "verification_evidence",
     "implementation_engine_binding",
     "requested_route",
     "actual_route",
@@ -321,43 +429,51 @@ describe("cross-model execution receipt seam parity (ce-work <-> lfg)", () => {
     "actual_model",
     "fallback_reason",
     "run_id",
+    "source_kind",
+    "source_digest",
     "unit_receipts",
     "plan_checkpoint",
     "blockers",
     "recovery_path",
+    "settled_decision_conflicts",
+    "behavior_change",
+    "standalone_shipping_skipped",
   ]
 
-  function sliceSection(content: string, startAnchor: string, endAnchor: string): string {
-    const start = content.indexOf(startAnchor)
-    expect(start, `start anchor not found: ${startAnchor}`).toBeGreaterThanOrEqual(0)
-    const end = content.indexOf(endAnchor, start + startAnchor.length)
-    expect(end, `end anchor not found: ${endAnchor}`).toBeGreaterThan(start)
-    return content.slice(start, end)
-  }
-
-  test("lfg requires every route receipt exposed by ce-work", async () => {
-    const ceWork = await readRepoFile("skills/ce-work/SKILL.md")
-    const lfg = await readRepoFile("skills/lfg/SKILL.md")
-    const returned = sliceSection(ceWork, "## Return-to-Caller Mode", "Engine selection (")
+  test("one full inventory pins every ce-work producer field and lfg consumer gate", async () => {
+    const returned = await readRepoFile("skills/ce-work/references/return-to-caller.md")
+    const workReturn = await readRepoFile("skills/lfg/references/work-return.md")
     const gate = sliceSection(
-      lfg,
-      "2. Invoke the `ce-work` skill with `mode:return-to-caller",
-      "3. Invoke the `ce-simplify-code`",
+      workReturn,
+      "## What `status: complete` must carry",
+      "## Verification evidence",
     )
 
-    for (const field of ROUTE_RECEIPT_FIELDS) {
-      expect(returned, `ce-work must return ${field}`).toContain(`\`${field}\``)
-      expect(gate, `lfg must gate on ${field}`).toContain(`\`${field}\``)
+    for (const field of COMPLETE_RETURN_FIELDS) {
+      const fieldToken = new RegExp("`" + field + "(?:`|:)")
+      expect(returned, `ce-work must return ${field}`).toMatch(fieldToken)
+      expect(gate, `lfg must require ${field} on every complete return`).toMatch(fieldToken)
     }
   })
 
-  test("lfg keeps the binding out of plan and review inputs", async () => {
+  test("lfg fails closed for unknown or malformed work returns", async () => {
     const lfg = await readRepoFile("skills/lfg/SKILL.md")
-    const carrier = sliceSection(
+    const gate = sliceSection(
       lfg,
-      "## Per-stage routing carriers",
-      "1. Invoke the `ce-plan` skill",
+      "2. **Read `references/work-return.md` first**",
+      "3. **Read `references/review-followup.md` now**",
     )
+
+    expect(gate).toContain("Only a valid `status: complete` may advance")
+    expect(gate).toContain("every other status")
+    expect(gate).toContain("malformed return")
+    expect(gate).toContain("stops the pipeline")
+  })
+
+  test("lfg keeps the binding out of plan and review inputs", async () => {
+    // Carrier grammar and sanitization live in the reference lfg's routing section
+    // names as a required read before step 1.
+    const carrier = await readRepoFile("skills/lfg/references/stage-routing.md")
     expect(carrier).toContain("Remove every routing directive")
     expect(carrier).toContain("Never pass")
     expect(carrier).toContain("`ce-plan`")
@@ -367,13 +483,23 @@ describe("cross-model execution receipt seam parity (ce-work <-> lfg)", () => {
 })
 
 describe("ce-debug regression test selection", () => {
+  // Added by #1054 to stop agents defaulting to a brand-new test file. The four homes are
+  // the mechanic of Phase 3's test-first step, and `references/fix.md` is a required read
+  // before any file is edited, so they are pinned across the corpus rather than verbatim
+  // in the always-loaded body. What must decide from the window without a read is the
+  // condition -- start from the tests that exist -- plus the confirmed-defect precondition
+  // that keeps the divergent case out; those two stay pinned in the body.
   test("inspects and updates existing tests instead of always adding new tests", async () => {
-    const content = await readRepoFile("skills/ce-debug/SKILL.md")
+    const body = await readRepoFile("skills/ce-debug/SKILL.md")
+    const fix = await readRepoFile("skills/ce-debug/references/fix.md")
+    const corpus = [body, fix].join("\n")
 
-    expect(content).toContain("inspect existing tests before adding coverage")
-    expect(content).toContain("update an existing test when it owns the contract")
-    expect(content).toContain("strengthen an over-mocked test")
-    expect(content).toContain("add a new minimal isolated test only when no existing test is the right home")
+    expect(body).toMatch(/start from the tests that exist rather than from a new file/i)
+    expect(body).toMatch(/confirmed defect/i)
+    expect(corpus).toContain("inspect existing tests before adding coverage")
+    expect(corpus).toContain("update an existing test when it owns the contract")
+    expect(corpus).toContain("strengthen an over-mocked test")
+    expect(corpus).toContain("add a new minimal isolated test only when no existing test is the right home")
   })
 
   // Observed drift: agents fired the Phase 2 fix-choice question on "root cause
@@ -389,30 +515,72 @@ describe("ce-debug regression test selection", () => {
     )
     // The gate must be anchored at the question site, not stated only in an early section.
     const gateIdx = content.indexOf("Same-turn presentation before the gate")
-    const askIdx = content.indexOf("Then ask (per **Blocking questions**)")
+    const askIdx = content.indexOf("ask (per **Blocking questions**) which path to take")
     expect(gateIdx).toBeGreaterThan(-1)
     expect(askIdx).toBeGreaterThan(gateIdx)
   })
 
   // Regression guard for the failure class in
   // docs/solutions/skill-design/post-menu-routing-belongs-inline.md (issue #714):
-  // Phase 4's per-option actions are always reached once a fix lands, so they must live
+  // Phase 4's per-case actions are always reached once a fix lands, so they must live
   // in the always-loaded SKILL.md body. A reference-only copy lets an agent that skipped
-  // the load render the menu and stop, or ship without `branding:on`.
-  test("keeps Phase 4 per-option handoff routing inline, not reference-only", async () => {
+  // the load stop at the summary, or ship without `branding:on`.
+  test("keeps Phase 4 per-case handoff routing inline, not reference-only", async () => {
     const content = await readRepoFile("skills/ce-debug/SKILL.md")
     const routing = content.slice(content.indexOf("#### Routing"))
 
     expect(content).toContain("#### Routing")
-    // Both branches name their action, and the action is a skill invocation, not advice
+    // Every case names its action, and the action is a skill invocation, not advice
     // to the user to type a command.
-    expect(routing).toContain("Skill-owned branch")
-    expect(routing).toContain("Pre-existing branch")
     expect(routing).toContain("via the platform's skill-invocation primitive")
     expect(routing).toContain("`ce-commit-push-pr` skill with `branding:on`")
-    expect(routing).toContain("invoke the `ce-commit` skill")
+    expect(routing).toMatch(/invoke the `ce-commit` skill/i)
     expect(routing).toContain("Stop here")
     expect(routing).toContain("`ce-compound`")
+
+    // Opening a PR is the default, not a question. The old three-option permission
+    // menu returning here is the regression this pins.
+    expect(routing).toMatch(/do not ask whether to open a pr/i)
+    expect(routing).not.toMatch(/commit the fix \(`ce-commit`\)/i)
+
+    // ...but "no question" is not "always push". `ce-commit-push-pr` pushes the whole
+    // branch and PRs every commit on it, so a branch carrying the user's unrelated work
+    // must commit locally instead. Pin the goal and the refusal, not case labels: three
+    // separate holes shipped here because routes were written as a flat case list and
+    // each new state matched one case while skipping another's handling.
+    expect(routing).toMatch(/anything the user did not offer up/i)
+    expect(routing).toMatch(/push nothing/i)
+    // The two questions must stay independent — collapsing them back into one flat list
+    // is what let "no remote" match a route that skipped commit scoping entirely.
+    expect(routing).toMatch(/the fix-owned files and nothing else/i)
+    expect(routing).toMatch(/holds on every route, remote or not/i)
+    // ...and question 1 must stay a constraint. When it also told the agent to invoke
+    // `ce-commit`, the shipping path committed twice (once there, once inside
+    // `ce-commit-push-pr`) and a non-repo tried to commit before reaching its stop.
+    expect(routing).toMatch(/never an action of its own/i)
+    expect(routing).toMatch(/exactly one of these runs/i)
+    // The ship gate turns on whether the branch's other commits are already under
+    // review, not on whether they were pushed. Gating on "commits since base" refuses
+    // the route to a branch with an open PR (the fix never reaches it); gating on
+    // "unpushed" lets backup-pushed WIP be swept into a first PR spanning it.
+    expect(routing).toMatch(/updates that PR rather than opening a second one/i)
+    // Pin the knowledge the agent cannot derive, NOT the git commands that answer it.
+    // Six revisions of this gate each prescribed a range or ref, and five were wrong for
+    // some git configuration (no upstream, local ahead of remote, no tracking config).
+    // The intent was never what reviewers found wrong, so the commands are gone and
+    // these pins guard the facts that make the check non-obvious.
+    expect(routing).toMatch(/whole branch/i)
+    expect(routing).toMatch(/not already \*\*offered\*\*/i)
+    expect(routing).toMatch(/compare against the remote rather than a local ref/i)
+    expect(routing).toMatch(/PR-capable/i)
+    // Failing to establish it must fall to the local route, never to shipping anyway.
+    expect(routing).toMatch(/take the local route instead/i)
+    // Declining the entangled commit must terminate, not fall through to question 2 and
+    // commit the very file the user chose to leave alone.
+    expect(routing).toMatch(/only the first answer continues/i)
+    // The entangled state is the one place a blocking question survives — no safe
+    // default exists once a fix-owned file already held the user's edits.
+    expect(routing).toMatch(/Ask \(per \*\*Blocking questions\*\*\)/)
 
     // The reference load must still be demanded, and must not be improvisable from the
     // inline routing: it has to name what only it carries and what skipping it costs.
@@ -423,6 +591,54 @@ describe("ce-debug regression test selection", () => {
     expect(stub).toContain("`references/post-fix-handoff.md`")
     expect(stub).toMatch(/none of that appears in this body/i)
     expect(stub).toMatch(/skipping the read/i)
+  })
+
+  // The reported failure was a skill proposing a Linear ticket for a bug the user had
+  // already handed it as a Sentry issue. The rule that prevents it spans Phase 0, Phase
+  // 1.4, and the handoff reference, so pin the load-bearing clause in each.
+  test("links an existing issue of record instead of creating a second one", async () => {
+    const content = await readRepoFile("skills/ce-debug/SKILL.md")
+    const handoff = await readRepoFile("skills/ce-debug/references/post-fix-handoff.md")
+
+    // Phase 0 records whatever the user supplied, tracker or error monitor alike.
+    expect(content).toMatch(/issue of record/i)
+    expect(content).toMatch(/Sentry/)
+    // The no-reference input (stack trace, failing test) has no record and needs none —
+    // without this, "never open a second record" still permits opening a first.
+    expect(content).toMatch(/no issue of record/i)
+    // Phase 1.4 reads prior work; it cannot become the bug's home.
+    expect(content).toMatch(/never establishes a new home for the bug/i)
+    // Linking an existing ticket stays allowed; only creating one is forbidden.
+    expect(handoff).toMatch(/never open a new record/i)
+  })
+
+  // ce-compound's durable-learning gate must be applied by ce-debug before it
+  // offers the handoff. The old sentence-length and location-count heuristics
+  // admitted routine fixes that the callee then had to reject.
+  test("applies ce-compound eligibility before offering learning capture", async () => {
+    const compound = await readRepoFile("skills/ce-compound/SKILL.md")
+    const debug = await readRepoFile("skills/ce-debug/SKILL.md")
+    const handoff = await readRepoFile("skills/ce-debug/references/post-fix-handoff.md")
+    const guide = await readRepoFile("docs/guides/ce-debug.md")
+
+    for (const condition of [
+      "durable project reasoning",
+      "not readily recoverable from the final code, tests, types, comments, or existing documentation",
+      "recurrence, material risk, or substantial rediscovery",
+      "if the learning document disappeared",
+      "Completion, effort, and diff size do not establish eligibility",
+    ]) {
+      expect(compound).toContain(condition)
+      expect(handoff).toContain(condition)
+    }
+
+    expect(debug).toMatch(/Only when that gate qualifies the fix, offer capture/i)
+    expect(debug).toMatch(/commit and push only the artifacts it actually wrote or updated/i)
+    expect(debug).toMatch(/If it writes nothing, end without a documentation commit/i)
+
+    const debugContract = [debug, handoff, guide].join("\n")
+    expect(debugContract).not.toMatch(/one-sentence insight|fits in one sentence/i)
+    expect(debugContract).not.toMatch(/pattern (?:appears )?in 3\+ locations/i)
   })
 })
 
@@ -459,12 +675,10 @@ describe("ce-plan review contract", () => {
       "Invoke the `ce-doc-review` skill with arguments `mode:non-interactive <plan-path>`",
     )
     expect(content).toContain("ce-doc-review` with `mode:non-interactive`")
-    expect(content).toContain(
-      "Pipeline runs invoke `ce-doc-review` with `mode:non-interactive` and the plan path",
+    expect(content).toMatch(
+      /invoke `ce-doc-review` with `mode:non-interactive` and the plan path/i,
     )
-    expect(skillStub).toContain(
-      "The default mode for markdown is non-interactive (`mode:non-interactive`)",
-    )
+    expect(skillStub).toMatch(/the default is non-interactive \(`mode:non-interactive`\)/i)
     expect(content).not.toContain("skip document-review and return control")
 
     // The interactive walkthrough is opt-in via the post-generation menu, not automatic
@@ -492,7 +706,7 @@ describe("ce-plan review contract", () => {
     // collapses back to a 4-option AskUserQuestion-friendly shape on Claude Code. FYI-only
     // state also hides the option since ce-doc-review's walkthrough is gated to actionable
     // findings (anchor 75/100, gated_auto/manual) and FYIs (anchor 50) bypass it.
-    expect(content).toContain("Hide `Decide on the review's open items` (option 3) when no actionable findings remain")
+    expect(content).toContain("Show `Decide on the review's open items` (option 3) only when the resolved review state has")
     expect(content).toContain("proposed_fixes_count + decisions_count > 0")
 
     // Summary line above the menu surfaces autofix counts and remaining-bucket counts
@@ -613,11 +827,11 @@ describe("ce-doc-review contract", () => {
     expect(synthesis).toContain("`gated_auto`")
     expect(synthesis).toContain("`manual`")
 
-    // Cross-persona agreement promotion (replaces +0.10 boost)
+    // Promotion requires independently verified evidence at the higher anchor.
     expect(synthesis).toContain("Cross-Persona Agreement Promotion")
     expect(synthesis).toContain("one anchor step")
-    expect(synthesis).toContain("`independence_verified` is `true`")
-    expect(synthesis).toContain("cannot use the twin fingerprint exception")
+    expect(synthesis).toContain("`independence_verified: true`")
+    expect(synthesis).toContain("cannot trigger anchor promotion")
     expect(synthesis).toContain("Cursor default/Auto")
 
     // R29 and R30 round-2 rules
@@ -642,63 +856,75 @@ describe("ce-doc-review contract", () => {
     expect(synthesis).toContain("Review complete")
   })
 
-  test("terminal question is three-option by default with label adaptation", async () => {
+  test("completed doc review returns control without authorizing another workflow", async () => {
     const synthesis = await readRepoFile(
       "skills/ce-doc-review/references/synthesis-and-presentation.md"
     )
-
-    // Three options when fixes are queued
-    expect(synthesis).toContain("Apply decisions and proceed to <next stage>")
-    expect(synthesis).toContain("Apply decisions and re-review")
-    expect(synthesis).toContain("Exit without further action")
-
-    // Two options in the zero-actionable case with the adapted label
-    expect(synthesis).toContain("fixes_applied_count == 0")
-    expect(synthesis).toContain("zero-actionable case")
-
-    // Next-stage substitution rules documented, readiness-aware: a
-    // requirements-only artifact routes to planning, implementation-ready to
-    // execution (unified and legacy classifications both covered).
+    expect(synthesis).toContain('Return "Review complete"')
+    expect(synthesis).toContain("does not need a terminal question")
     expect(synthesis).toContain("requirements-only unified plan")
     expect(synthesis).toContain("implementation-ready unified plan")
-    expect(synthesis).toContain("legacy standalone requirements doc")
-    expect(synthesis).toContain("legacy implementation plan")
-    expect(synthesis).toContain("ce-plan")
-    expect(synthesis).toContain("ce-work")
+    expect(synthesis).toContain("user's existing request authorizes it")
+    // 2026-09-14: "return control to the caller" read as a handoff cue that ended
+    // the turn in an inline lfg run; the invariant is the nested return, stated as
+    // the skill ending rather than the turn.
+    expect(synthesis).toContain("ends this skill, not the turn")
   })
 
+  // Split by load-time: the question-tool rules and the dispatch backpressure
+  // contract must fire from the always-loaded window, while the payload table
+  // (decision primer included) lives in the reference the body mandates before
+  // dispatch.
   test("SKILL.md has Interactive mode rules with AskUserQuestion pre-load", async () => {
     const content = await readRepoFile(
       "skills/ce-doc-review/SKILL.md"
     )
 
-    // Interactive mode rules section at top
+    // Interactive mode rules section at top: the body must route into the mode
+    // reference before anything else and must keep the never-narrate rule; the
+    // per-harness tool names and the fallback trigger live in that reference,
+    // which is read before any question can fire.
     expect(content).toContain("## Interactive mode rules")
-    expect(content).toContain("AskUserQuestion")
-    expect(content).toContain("ToolSearch")
-    expect(content).toContain("numbered-list fallback")
+    expect(content).toContain("`references/modes.md`")
+    expect(content).toMatch(/calls the tool or falls back loudly/)
     expect(content).toContain("bounded parallelism")
-    expect(content).toContain("active-subagent limit")
-    expect(content).toContain("spawn errors as backpressure, not reviewer failure")
-    expect(content).toContain("queue the remainder")
-
-    // Decision primer variable in the dispatch table
-    expect(content).toContain("{decision_primer}")
-    expect(content).toContain("<prior-decisions>")
+    // The body keeps the condition that a capacity rejection is backpressure;
+    // the queueing mechanics live in the dispatch reference read at that step.
+    expect(content).toMatch(/backpressure, not reviewer failure/)
 
     // References loaded lazily via backtick paths for walk-through and bulk-preview
     expect(content).toContain("`references/walkthrough.md`")
     expect(content).toContain("`references/bulk-preview.md`")
   })
 
-  // Reproduced on Codex (gpt-5.6-sol), 4/4 runs: a plan whose only storage-related
+  test("the dispatch reference carries the payload table and decision primer", async () => {
+    const dispatch = await readRepoFile("skills/ce-doc-review/references/dispatch.md")
+    const modes = await readRepoFile("skills/ce-doc-review/references/modes.md")
+    const skill = await readRepoFile("skills/ce-doc-review/SKILL.md")
+
+    expect(skill).toContain("`references/dispatch.md`")
+    expect(dispatch).toContain("{decision_primer}")
+    expect(dispatch).toContain("<prior-decisions>")
+    // Question-tool discovery matches the current list by capability (issue #1522);
+    // Claude's ToolSearch select:AskUserQuestion is not the portable path.
+    expect(modes).toContain("already in the current tool list")
+    expect(modes).toContain("never call a user-facing question tool")
+    expect(modes).not.toContain("select:AskUserQuestion")
+    expect(modes).toContain("numbered-list fallback")
+    expect(dispatch).toContain("active-subagent limit")
+    expect(dispatch).toContain("spawn errors as backpressure, not reviewer failure")
+    expect(dispatch).toContain("queue the remainder")
+  })
+
+  // Reproduced on Codex (gpt-6-sol), 4/4 runs: a plan whose only storage-related
   // content was an internal schema migration activated security-lens, justified as
   // "changes data-store entries ... with deployment-ordering risks". The bare
   // "data handling" trigger matches every plan. security-lens is one of the
   // conditional judgment trio, so a false positive also fires the cross-model peer
   // pass — the over-activation costs real peer spend, not just an extra reviewer.
   test("security-lens is bounded to sensitive data, not any data handling", async () => {
-    const content = await readRepoFile("skills/ce-doc-review/SKILL.md")
+    // Activation now lives in the reference the body mandates before selection.
+    const content = await readRepoFile("skills/ce-doc-review/references/persona-selection.md")
     const line = content
       .split("\n")
       .find((l) => l.startsWith("**security-lens**"))
@@ -712,8 +938,22 @@ describe("ce-doc-review contract", () => {
     expect(line).not.toMatch(/(^|[;,] )data handling,/i)
   })
 
+  // product-lens activated on "solution selection where alternatives plausibly exist",
+  // which holds for nearly any fix, so a judgment persona (and, through the trio gate,
+  // the cross-model pass) ran on routine bootstrap plans. The leg is now one condition:
+  // an unsettled product position; a mechanism choice is not one.
+  test("product-lens activates on an unsettled product position, not on plausible alternatives", async () => {
+    const content = await readRepoFile("skills/ce-doc-review/references/persona-selection.md")
+    const block = sliceSection(content, "**product-lens**", "**design-lens**")
+    expect(block).toMatch(/product position/)
+    expect(block).toMatch(/no upstream Product Contract settled|origin did not already settle/)
+    expect(block).toMatch(/choice among mechanisms .* is an implementation decision, not a product position/)
+    expect(block).not.toMatch(/alternatives plausibly exist/)
+    expect(block).toMatch(/\*Strategic weight\*/)
+  })
+
   test("keeps security document review on the parent capability tier", async () => {
-    const content = await readRepoFile("skills/ce-doc-review/SKILL.md")
+    const content = await readRepoFile("skills/ce-doc-review/references/dispatch.md")
     const modelTierSection = content.slice(content.indexOf("Model tiering lives here"))
     const securityTierLine = modelTierSection
       .split("\n")
@@ -762,15 +1002,17 @@ describe("ce-doc-review contract", () => {
     expect(bulkPreview).toContain("Skipping (N):")
 
     // The preview and question are two ordered user-facing events. The
-    // portable contract names the capability before non-exhaustive adapters.
+    // portable contract names the capability, then matches a tool already in
+    // the current list — not a closed per-host catalog (issue #1522).
     const previewEvent = bulkPreview.indexOf("Preview event")
     const questionCapability = bulkPreview.indexOf(
       "agent-callable blocking-question capability"
     )
-    const adapters = bulkPreview.indexOf("Non-exhaustive adapters")
+    const listMatch = bulkPreview.indexOf("already in the current tool list")
     expect(previewEvent).toBeGreaterThan(-1)
     expect(questionCapability).toBeGreaterThan(previewEvent)
-    expect(adapters).toBeGreaterThan(questionCapability)
+    expect(listMatch).toBeGreaterThan(questionCapability)
+    expect(bulkPreview).not.toContain("select:AskUserQuestion")
     expect(bulkPreview).toContain("user-visible assistant text")
     expect(bulkPreview).toMatch(/(?:thinking|reasoning).*does not count/)
     expect(bulkPreview).toContain("do not invoke the blocking-question capability")
@@ -786,7 +1028,8 @@ describe("ce-doc-review contract", () => {
 
     // Append mechanic steps
     expect(defer).toContain("## Deferred / Open Questions")
-    expect(defer).toContain("### From YYYY-MM-DD review")
+    expect(defer).toContain("From YYYY-MM-DD review")
+    expect(defer).toContain("regardless of heading syntax")
 
     // Entry format includes required fields but excludes suggested_fix and evidence
     expect(defer).toContain("{title}")
@@ -846,14 +1089,86 @@ describe("ce-compound frontmatter schema expansion contract", () => {
   })
 })
 
+describe("ce-compound vocabulary is corpus-first, not Rails-specific (issue #1264)", () => {
+  const RAILS_VALUES = [
+    "rails_model",
+    "rails_controller",
+    "rails_view",
+    "frontend_stimulus",
+    "hotwire_turbo",
+    "email_processing",
+    "brief_system",
+    "missing_association",
+    "missing_include",
+    "thread_violation",
+    "rails_version",
+  ]
+
+  test("schema.yaml no longer defines origin-repo Rails vocabulary", async () => {
+    const schema = await readRepoFile("skills/ce-compound/references/schema.yaml")
+    for (const value of RAILS_VALUES) {
+      // list items and field keys are definitions; the backward-compat comment may still name them
+      expect(schema).not.toMatch(new RegExp(`^\\s+- ${value}$`, "m"))
+      expect(schema).not.toMatch(new RegExp(`^\\s+${value}:`, "m"))
+    }
+  })
+
+  test("yaml-schema.md no longer defines origin-repo Rails vocabulary", async () => {
+    const mapping = await readRepoFile("skills/ce-compound/references/yaml-schema.md")
+    for (const value of RAILS_VALUES) {
+      // definitions are field bullets and "One of ..." value lists; the backward-compat note may still name them
+      expect(mapping).not.toContain("**" + value + "**")
+      expect(mapping).not.toMatch(new RegExp("One of[^\\n]*`" + value + "`"))
+    }
+  })
+
+  test("schema.yaml treats component and root_cause as open vocabulary with suggested defaults", async () => {
+    const schema = await readRepoFile("skills/ce-compound/references/schema.yaml")
+    // problem_type stays a closed enum because it drives track selection
+    expect(schema).toMatch(/problem_type:\n\s+type: enum/)
+    // component / root_cause are strings with suggestions, not closed enums
+    expect(schema).toMatch(/component:\n\s+type: string\n\s+suggested_values:/)
+    expect(schema).toMatch(/root_cause:\n\s+type: string\n\s+suggested_values:/)
+    // the corpus-first rule is a validation rule, not a comment
+    expect(schema).toMatch(/validation_rules:[\s\S]*existing docs/)
+  })
+
+  test("the classifier samples existing docs before falling back to schema defaults", async () => {
+    // Both classification paths moved into the references the body names at
+    // their step; the corpus-first rule is asserted where each one now lives.
+    const research = await readRepoFile("skills/ce-compound/references/research.md")
+    const contextAnalyzer = sliceSection(research, "#### 1. **Context Analyzer**", "#### 2. **Solution Extractor**")
+    expect(contextAnalyzer).toMatch(/existing docs .*<root>\/solutions\//)
+    expect(contextAnalyzer).toMatch(/directory/)
+    // lightweight mode classifies inline and must carry the same rule
+    const lightweight = await readRepoFile("skills/ce-compound/references/lightweight.md")
+    expect(lightweight).toMatch(/existing docs/)
+  })
+
+  test("ce-compound-refresh replace flow keeps the old learning's component/root_cause", async () => {
+    const flows = await readRepoFile("skills/ce-compound-refresh/references/per-action-flows.md")
+    const replaceFlow = sliceSection(flows, "## Replace Flow", "3. **Validate parser-safety")
+    expect(replaceFlow).toMatch(/corpus-first rule in `references\/yaml-schema\.md`/)
+    expect(replaceFlow).toMatch(/counting the old learning as one of the corpus's docs/)
+  })
+
+  test("yaml-schema.md category mapping defers to an existing directory taxonomy", async () => {
+    const mapping = await readRepoFile("skills/ce-compound/references/yaml-schema.md")
+    const section = sliceSection(mapping, "## Category Mapping", "## Validation Rules")
+    expect(section).toMatch(/existing director/)
+  })
+})
+
 describe("ce-compound Phase 1 artifact contract", () => {
   // Regression guard for issue #956: Phase 1 subagents that returned long-form
   // prose only as their inline Agent response failed silently when the harness
   // collapsed the return to an executive summary. The fix mirrors ce-code-review's
   // proven /tmp run-artifact pattern: subagents write full output to disk and the
   // orchestrator Reads it back with the inline return as a fallback.
+  // Phase 1 and Phase 2 moved into references/research.md and references/assembly.md;
+  // the #956 artifact contract is asserted in the files that now own it.
   test("generates a run id and run dir before dispatching Phase 1 subagents", async () => {
-    const content = await readRepoFile("skills/ce-compound/SKILL.md")
+    const content = await readRepoFile("skills/ce-compound/references/research.md")
 
     // A run identifier scopes the per-subagent artifact files
     expect(content).toContain("RUN_ID")
@@ -864,12 +1179,9 @@ describe("ce-compound Phase 1 artifact contract", () => {
   })
 
   test("Phase 1 subagents write full output to the run-artifact path", async () => {
-    const content = await readRepoFile("skills/ce-compound/SKILL.md")
+    const content = await readRepoFile("skills/ce-compound/references/research.md")
 
-    const phase1 = content.slice(
-      content.indexOf("### Phase 1: Research"),
-      content.indexOf("### Phase 2: Assembly & Write"),
-    )
+    const phase1 = content.slice(content.indexOf("### Phase 1: Research"))
 
     // Subagents are instructed to write their full structured output to the run dir
     expect(phase1).toContain("{run_dir}")
@@ -882,7 +1194,7 @@ describe("ce-compound Phase 1 artifact contract", () => {
   })
 
   test("Phase 2 assembly reads artifacts with inline-return fallback", async () => {
-    const content = await readRepoFile("skills/ce-compound/SKILL.md")
+    const content = await readRepoFile("skills/ce-compound/references/assembly.md")
 
     const phase2 = content.slice(
       content.indexOf("### Phase 2: Assembly & Write"),
@@ -896,7 +1208,8 @@ describe("ce-compound Phase 1 artifact contract", () => {
   })
 
   test("no longer imposes an absolute no-write rule on Phase 1 subagents", async () => {
-    const content = await readRepoFile("skills/ce-compound/SKILL.md")
+    const content = (await readRepoFile("skills/ce-compound/SKILL.md")) +
+      (await readRepoFile("skills/ce-compound/references/research.md"))
 
     // The brittle absolute prohibition is gone — only product-file writes are reserved
     // to the orchestrator; scratch artifacts under /tmp are now expected.
@@ -915,26 +1228,31 @@ describe("concept-teaching seam parity (ce-commit-push-pr <-> lfg)", () => {
   // that both ends name the same trailer format and that the callsite hardcodes the
   // non-interactive mode (a drift on either end fails here, not in production runs).
   test("lfg hardcodes mode:pipeline at the callsite and echoes the trailer", async () => {
-    const skill = await readRepoFile("skills/ce-commit-push-pr/SKILL.md")
+    const skill = await readRepoFile("skills/ce-commit-push-pr/references/apply-and-handoff.md")
     const lfg = await readRepoFile("skills/lfg/SKILL.md")
 
-    // Both ends name the same trailer format
+    // Both ends name the same trailer format (ce-commit-push-pr prints it from the
+    // apply reference its Step 5 mandates).
     expect(skill).toContain("New concepts:")
-    expect(lfg).toContain("New concepts:")
+    // The trailer is consumed in the shipping reference lfg's step 9 reads first.
+    expect(await readRepoFile("skills/lfg/references/shipping.md")).toContain("New concepts:")
 
     // The callsite passes the mode explicitly rather than relying on defaults
-    expect(lfg).toContain("Invoke the `ce-commit-push-pr` skill with `mode:pipeline branding:on`.")
+    expect(lfg).toContain("invoke the `ce-commit-push-pr` skill with `mode:pipeline branding:on`")
 
-    // The pre-DONE report names the concept and renders each user-runnable
-    // handoff for the active host rather than hardcoding one harness's syntax.
-    expect(lfg).toContain("New concept introduced:")
-    expect(lfg).toContain("run <rendered ce-explain invocation> to go deeper")
-    expect(lfg).toContain("run <rendered ce-babysit-pr invocation> to watch it through review to merge")
+    // The pre-DONE report names the concept and renders each user-runnable handoff
+    // for the active host rather than hardcoding one harness's syntax. That report
+    // moved into the reference lfg's step 10 names as a required read before it
+    // prints anything, so the rendering contract is asserted there.
+    const closeOut = await readRepoFile("skills/lfg/references/shipping.md")
+    expect(closeOut).toContain("New concept introduced:")
+    expect(closeOut).toContain("run <rendered ce-explain invocation> to go deeper")
+    expect(closeOut).toContain("run <rendered ce-babysit-pr invocation> to watch it through review to merge")
     for (const target of ["ce-explain <name>", "ce-babysit-pr <pr-url>"]) {
-      expect(lfg).toContain(`$${target}`)
-      expect(lfg).toContain(`/${target}`)
+      expect(closeOut).toContain(`$${target}`)
+      expect(closeOut).toContain(`/${target}`)
     }
-    expect(lfg).toMatch(/default to `\/ce-explain <name>`[\s\S]{0,360}Codex[\s\S]{0,220}output one form only/i)
+    expect(closeOut).toMatch(/default to `\/ce-explain <name>`[\s\S]{0,360}Codex[\s\S]{0,220}output one form only/i)
 
     // The callee documents the mode the caller passes
     expect(skill).toContain("mode:pipeline")
@@ -950,10 +1268,9 @@ describe("explicit Compound Engineering branding provenance", () => {
 
     expect(shipping).toContain("Load the `ce-commit-push-pr` skill with `branding:on`")
     expect(lfg).toContain("ce-commit-push-pr` skill with `mode:pipeline branding:on`")
-    // Both branch invocations must stay in the always-loaded body, not the reference —
+    // The shipping invocation must stay in the always-loaded body, not the reference —
     // see the Phase 4 routing test below.
     expect(debug).toContain("invoke the `ce-commit-push-pr` skill with `branding:on`.")
-    expect(debug).toContain("reviewed fix (invoke the `ce-commit-push-pr` skill with `branding:on`)")
     expect(debug).not.toContain("`/ce-commit-push-pr branding:on`")
     expect(debugHandoff).not.toContain("`/ce-commit-push-pr branding:on`")
   })

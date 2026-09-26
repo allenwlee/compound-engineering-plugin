@@ -165,6 +165,36 @@ class OwnershipCheck(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertNotIn("SECRET", out + err)
 
+    @unittest.skipIf(IS_WINDOWS, "uid ownership mock is POSIX-only")
+    def test_absent_path_artifact_reports_ownership_failure(self):
+        # An absent --path artifact whose job dir fails the owner check exits 4,
+        # not the routine 3, and never reads that job's `reason` through the
+        # directory that just failed verification (#1607).
+        job_dir, _ = make_done_job()
+        with open(os.path.join(job_dir, "reason"), "w") as f:
+            f.write("SECRET-REASON\n")
+        missing = os.path.join(os.path.dirname(job_dir), "no-artifact.json")
+        with mock.patch("os.fstat", uid_mismatch_fstat()):
+            code, out, err = run_main(["result", job_dir, "--path", missing])
+        self.assertEqual(code, 4)
+        self.assertEqual(out, "")
+        self.assertIn("no artifact at", err)
+        self.assertIn("unreadable", err)
+        self.assertNotIn("SECRET-REASON", out + err)
+
+    def test_control_absent_path_artifact_owned_job_reports_state(self):
+        # Control: the same absent artifact on an owned job reports the settled
+        # state and its reason, proving the case above turns on ownership alone.
+        job_dir, _ = make_done_job()
+        with open(os.path.join(job_dir, "reason"), "w") as f:
+            f.write("worker exited 0\n")
+        missing = os.path.join(os.path.dirname(job_dir), "no-artifact.json")
+        code, out, err = run_main(["result", job_dir, "--path", missing])
+        self.assertEqual(code, 3)
+        self.assertIn("no artifact at", err)
+        self.assertIn("done", err)
+        self.assertIn("worker exited 0", err)
+
     def test_control_owned_job_emits_content(self):
         # Control: without the patch the same fabricated job succeeds, proving
         # the tests above exercise the ownership check and nothing else.
@@ -1185,6 +1215,90 @@ class HardDefaultFromCrossModel(unittest.TestCase):
             {"CE_PEER_HARD_SECS": "", "CROSS_MODEL_HARD_SECS": "2000"},
         ):
             self.assertEqual(MOD.cfg()["hard"], 2030.0)
+
+
+class PreReuseDescendantPids(unittest.TestCase):
+    """Cutoff on a recycled leader pid applies only to its direct children."""
+
+    def test_keeps_late_descendants_of_a_pre_reuse_child(self):
+        # root 10 was recycled. 20 is an original-tree child; 21 is spawned by
+        # 20 after reuse; 30/31 belong to the new process at pid 10.
+        children = {10: [20, 30], 20: [21], 30: [31]}
+        keep = MOD._pre_reuse_descendant_pids(10, children, lambda pid: pid == 20)
+        self.assertEqual(keep, {20, 21})
+
+    def test_unproven_start_keeps_the_direct_child_and_subtree(self):
+        children = {1: [2], 2: [3]}
+        keep = MOD._pre_reuse_descendant_pids(1, children, lambda _pid: True)
+        self.assertEqual(keep, {2, 3})
+
+    def test_skips_self_in_a_pre_reuse_subtree(self):
+        children = {1: [2], 2: [99]}
+        keep = MOD._pre_reuse_descendant_pids(
+            1, children, lambda _pid: True, skip_pid=99)
+        self.assertEqual(keep, {2})
+
+
+class WindowsKillTreePidReuse(unittest.TestCase):
+    """cmd_reap after a dead worker must not TerminateProcess a recycled PID.
+
+    Windows recycles PIDs aggressively. test_orphan_grandchild_swept_by_reap
+    kills the supervisor, waits for the worker leader to exit, then starts
+    `reap` — the next python.exe, which can reuse worker_pid. Without a guard,
+    _win_kill_tree sees that pid alive (it is us) and TerminateProcess(handle,
+    1) suicides: exit 1, empty stderr. That is the windows-native flake.
+    """
+
+    @unittest.skipUnless(IS_WINDOWS, "native Windows kill_tree only")
+    def test_terminate_pid_refuses_current_process(self):
+        self.assertFalse(MOD._win_terminate_pid(os.getpid()))
+        self.assertTrue(MOD._pid_alive(os.getpid()))
+
+    @unittest.skipUnless(IS_WINDOWS, "native Windows kill_tree only")
+    def test_kill_tree_of_current_pid_does_not_terminate_self(self):
+        alive = MOD._win_kill_tree(os.getpid(), 0.0)
+        self.assertFalse(alive)
+        self.assertTrue(MOD._pid_alive(os.getpid()))
+
+    @unittest.skipUnless(IS_WINDOWS, "native Windows kill_tree only")
+    def test_cmd_reap_does_not_suicide_when_worker_pid_is_self(self):
+        root = tempfile.mkdtemp(prefix="peer-reap-self-")
+        job_dir = os.path.join(root, "job")
+        os.mkdir(job_dir, 0o700)
+        with open(os.path.join(job_dir, "pid"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "supervisor_pid": 0,
+                    "worker_pid": os.getpid(),
+                },
+                f,
+            )
+        with open(os.path.join(job_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {"job_id": "job", "skill": "ce-doc-review", "run_id": "run1"},
+                f,
+            )
+        code, _out, err = run_main(["reap", job_dir])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(MOD._pid_alive(os.getpid()))
+        with open(os.path.join(job_dir, "status"), encoding="utf-8") as f:
+            self.assertEqual(f.read().strip(), "died-without-result")
+
+    @unittest.skipUnless(IS_WINDOWS, "native Windows identity probe only")
+    def test_process_identity_is_stable_and_differs_across_processes(self):
+        mine = MOD._win_process_identity(os.getpid())
+        self.assertIsNotNone(mine)
+        self.assertEqual(mine, MOD._win_process_identity(os.getpid()))
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+        )
+        try:
+            other = MOD._win_process_identity(child.pid)
+            self.assertIsNotNone(other)
+            self.assertNotEqual(other, mine)
+        finally:
+            child.kill()
+            child.wait(timeout=5)
 
 
 if __name__ == "__main__":

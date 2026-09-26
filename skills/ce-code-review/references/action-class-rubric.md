@@ -1,6 +1,6 @@
 # `autofix_class` rubric (personas)
 
-`autofix_class` describes the **intrinsic shape** of follow-up work — it is signal, **not an apply gate or permission**. In report-only runs the user or caller interprets findings and owns apply; when local apply was explicitly authorized, Stage 5c still uses judgment. Either way the class informs *what to do first* and *what to flag* — it does not mechanically decide what gets applied.
+`autofix_class` describes the **shape** of the follow-up work a finding needs — it is information, **not a check that permits or blocks applying a fix**. In report-only runs the user or caller interprets findings and decides what to apply; when local apply was explicitly authorized, Stage 5c (Act on findings) still uses judgment. Either way the class informs *what to do first* and *what to flag* — it does not mechanically decide what gets applied.
 
 | `autofix_class` | Meaning |
 |-----------------|---------|
@@ -24,3 +24,44 @@
 | `release` | Operational / rollout follow-up. |
 
 Do not use `review-fixer`.
+
+## Severity Scale
+
+The merge bar is the one from Google's Code Review Developer Guide: the change must improve overall code health, not be perfect. Severity ranks by that bar — functionality and design defects outrank style and taste, and a finding whose only claim is "could be better" never blocks.
+
+All reviewers use P0-P3:
+
+| Level | Meaning | Action |
+|-------|---------|--------|
+| **P0** | Critical breakage, exploitable vulnerability, data loss/corruption | Must fix before merge |
+| **P1** | High-impact defect likely hit in normal usage, breaking contract | Should fix |
+| **P2** | Moderate issue with meaningful downside (edge case, perf regression, maintainability trap) | Fix if straightforward |
+| **P3** | Low-impact, narrow scope, minor improvement | User's discretion |
+
+## Action Routing
+
+Severity answers **urgency**. `autofix_class` and `owner` are **information** describing the shape of follow-up work for callers; this metadata does not grant apply permission. Permission to apply fixes is a separate, explicit authorization that Stage 5c checks before touching any file. The persona guidance for choosing a class is at the top of this reference.
+
+| `autofix_class` | Default owner | Meaning |
+|-----------------|---------------|---------|
+| `gated_auto` | `downstream-resolver` or `human` | Concrete `suggested_fix` proposed; caller applies after judgment |
+| `manual` | `downstream-resolver` or `human` | Actionable work needing design input or handoff |
+| `advisory` | `human` or `release` | Report-only — learnings, rollout notes, residual risk |
+
+Routing rules:
+
+- **Synthesis (Stage 5, Merge findings) makes the final decision on `autofix_class` and `owner`.** The values a persona supplies are input, not the last word.
+- **When reviewers disagree, keep the more cautious class.** A merged finding may move from `gated_auto` to `manual`; moving the other way needs stronger evidence.
+- **Reject `safe_auto` and `review-fixer` if present** — drop the finding or remap to `gated_auto` / `downstream-resolver` during synthesis.
+- **`requires_verification: true` means any caller-applied fix needs targeted tests or follow-up validation.**
+
+## Protected Artifacts
+
+Compound-engineering pipeline artifacts must never be flagged for deletion, removal, or gitignore by any reviewer. A protected artifact is any file **under** a `plans/`, `solutions/`, or legacy `brainstorms/` directory **whose immediate parent is the artifact root** — a directory named `docs` (the default, and where unmigrated legacy artifacts stay even after a project sets `docs_root`) or the configured `docs_root` when this run resolved it:
+
+- `plans/` under the artifact root -- unified plan artifacts created by ce-brainstorm or ce-plan (decision artifacts; execution progress is derived from git, not stored in plan bodies)
+- `solutions/` under the artifact root -- solution documents created during the pipeline (categories nest, e.g. `solutions/<category>/foo.md`)
+- the legacy `brainstorms/` -- requirements documents created by older ce-brainstorm versions
+
+Matching by the immediate parent covers nested category files while leaving a same-named directory elsewhere (a skill's own `references/personas/` prompt assets, parented by `references`) as ordinary code whose deletion finding stands. A run that never resolved a configured root still protects the `docs`-parented tree; a configured-root artifact seen by such a run is the one honest gap. A finding that recommends deleting, removing, or gitignoring such a file is never emitted, on any depth path; synthesis discards one that arrives anyway.
+

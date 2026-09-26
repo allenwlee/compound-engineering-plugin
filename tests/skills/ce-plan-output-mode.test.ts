@@ -9,6 +9,26 @@ const SKILL_PATH = path.join(
 )
 const SKILL_BODY = readFileSync(SKILL_PATH, "utf8")
 
+const OUTPUT_MODE_BODY = readFileSync(
+  path.join(process.cwd(), "skills/ce-plan/references/output-mode.md"),
+  "utf8",
+)
+
+const FINAL_REVIEW_BODY = readFileSync(
+  path.join(process.cwd(), "skills/ce-plan/references/final-review.md"),
+  "utf8",
+)
+
+const RESUME_BODY = readFileSync(
+  path.join(process.cwd(), "skills/ce-plan/references/resume.md"),
+  "utf8",
+)
+
+const HANDOFF_BODY = readFileSync(
+  path.join(process.cwd(), "skills/ce-plan/references/plan-handoff.md"),
+  "utf8",
+)
+
 const HTML_RENDERING_PATH = path.join(
   process.cwd(),
   "skills/ce-plan/references/html-rendering.md",
@@ -22,9 +42,9 @@ const PLAN_SECTIONS_PATH = path.join(
 // Regression guard for the `output:html` / `output:md` argument on ce-plan.
 // Under exclusive output mode, the plan is written as EITHER markdown OR
 // HTML — never both. The skill body must carry the load-bearing surface:
-// the argument-hint advertises the flag, the resolution prose is inline
-// (not deferred to a reference), and the pipeline-mode override guarantees
-// automated downstream consumers always get markdown.
+// the argument-hint advertises the flag, the kernel requires the output owner
+// before phase interpretation, and that owner preserves the precedence and
+// four-step precedence; there is no pipeline override (decision 2026-09-10).
 describe("ce-plan output:html mode", () => {
   test("argument-hint advertises output:html", () => {
     // argument-hint is in the frontmatter. Extract and parse to confirm
@@ -40,28 +60,18 @@ describe("ce-plan output:html mode", () => {
     ).toBe(true)
   })
 
-  test("SKILL.md describes the Output Mode resolution inline (not solely in a reference)", () => {
-    // The resolution is load-bearing — it determines whether HTML emits at all.
-    // Per the AGENTS.md skill design principle ("SKILL.md content caches at
-    // session start; references load on demand"), load-bearing rules must live
-    // inline. References can describe the HTML composition mechanics, but the
-    // arg/config/default precedence and pipeline override must be reachable
-    // from the cached skill body.
+  test("SKILL.md requires the output owner before phase interpretation", () => {
     expect(
-      /Output Mode|OUTPUT_FORMAT/i.test(SKILL_BODY),
-      "SKILL.md must contain an Output Mode resolution section that establishes OUTPUT_FORMAT before downstream phases reference it.",
+      /Read `references\/output-mode\.md` before interpreting any phase/i.test(SKILL_BODY),
+      "SKILL.md must require output-mode.md before any phase can interpret its inputs.",
     ).toBe(true)
 
-    // Precedence must be stated: in-prompt request > user-stated preference >
-    // config > default, with a pipeline
-    // override. All three signals must be named so an agent reading the file
-    // resolves correctly without consulting a reference.
-    const phaseStart = SKILL_BODY.indexOf("#### 0.0")
+    const phaseStart = OUTPUT_MODE_BODY.indexOf("## 0.0")
     expect(
       phaseStart,
-      "ce-plan SKILL.md no longer contains the Phase 0.0 anchor — Output Mode resolution was removed or moved without updating the test.",
+      "output-mode.md no longer contains the Phase 0.0 owner anchor.",
     ).toBeGreaterThan(-1)
-    const phaseRegion = SKILL_BODY.slice(phaseStart, phaseStart + 4500)
+    const phaseRegion = OUTPUT_MODE_BODY.slice(phaseStart)
 
     expect(
       /output:/.test(phaseRegion),
@@ -71,10 +81,8 @@ describe("ce-plan output:html mode", () => {
       /plan_output/.test(phaseRegion),
       "Phase 0.0 must name the `plan_output` config key.",
     ).toBe(true)
-    expect(
-      /pipeline|disable-model-invocation/i.test(phaseRegion),
-      "Phase 0.0 must describe the pipeline-mode override that forces markdown.",
-    ).toBe(true)
+    // Decision 2026-09-10: no pipeline override. Format comes only from the prompt, a user preference, config, or the default; a headless run resolves it the same way. Pin the absence.
+    expect(/\*\*Pipeline override\.\*\*|forces? `?(OUTPUT_FORMAT=)?md`? regardless/i.test(phaseRegion)).toBe(false)
     expect(
       /literal[\s-]prefix|literal prefix/i.test(phaseRegion),
       "Phase 0.0 must state the literal-prefix token-parsing convention so `feat:`/`fix:`/`chore:` in feature descriptions pass through verbatim.",
@@ -121,12 +129,38 @@ describe("ce-plan output:html mode", () => {
     // flag-token. Both names must appear together in the parsing prose so a
     // future implementer doesn't generalize to "any <word>:<word> token" and
     // accidentally consume conventional commit prefixes.
-    const phaseStart = SKILL_BODY.indexOf("#### 0.0")
-    const phaseRegion = SKILL_BODY.slice(phaseStart, phaseStart + 4500)
+    const phaseStart = OUTPUT_MODE_BODY.indexOf("## 0.0")
+    const phaseRegion = OUTPUT_MODE_BODY.slice(phaseStart)
     expect(
       /mode:/.test(phaseRegion) && /output:/.test(phaseRegion),
       "Phase 0.0 token-parsing convention must name both `mode:` and `output:` as literal-prefix flags so the rule generalizes correctly.",
     ).toBe(true)
+  })
+
+  test("no-artifact routes do not acquire a repository-backed format dependency", () => {
+    const phaseStart = OUTPUT_MODE_BODY.indexOf("## 0.0")
+    const phaseRegion = OUTPUT_MODE_BODY.slice(phaseStart)
+
+    expect(phaseRegion).toContain("keep config/default resolution pending until an artifact-producing route is known")
+    expect(phaseRegion).toContain("A terminal no-artifact route never probes config")
+    expect(phaseRegion).toContain("settle it before selecting a renderer or composing the artifact path")
+  })
+
+  test("software routing completes deferred output resolution before Phase 0.2", () => {
+    const domainRoute = RESUME_BODY.slice(RESUME_BODY.indexOf("#### 0.1b Classify Task Domain"))
+
+    expect(domainRoute).toContain("the artifact-producing route is now known")
+    expect(domainRoute).toContain("Re-read `references/output-mode.md`")
+    expect(domainRoute).toMatch(/settle any pending config\/default resolution before selecting the renderer or continuing to Phase 0\.2/i)
+  })
+
+  test("the kernel is the sole model-elevation dispatcher", () => {
+    expect(SKILL_BODY).toContain("Immediately before authoring, read `references/reasoning-elevation.md`")
+    // Condition: final-review hands the elevation decision back to SKILL.md's
+    // Model elevation step rather than making it here.
+    expect(FINAL_REVIEW_BODY).toMatch(/Return to SKILL\.md for its Model elevation step/)
+    expect(FINAL_REVIEW_BODY).toContain("does not dispatch the authoring route itself")
+    expect(FINAL_REVIEW_BODY).not.toContain("load `references/reasoning-elevation.md`")
   })
 
   test("config matching rule ignores commented YAML lines (active-key principle)", () => {
@@ -137,15 +171,24 @@ describe("ce-plan output:html mode", () => {
     // require an ACTIVE (non-commented) key, and name the failure mode so a
     // future maintainer doesn't loosen it back. We check the principle is
     // present, not a specific phrasing.
-    const phaseStart = SKILL_BODY.indexOf("#### 0.0")
-    const phaseRegion = SKILL_BODY.slice(phaseStart, phaseStart + 4500)
+    const phaseStart = OUTPUT_MODE_BODY.indexOf("## 0.0")
+    const phaseRegion = OUTPUT_MODE_BODY.slice(phaseStart)
     expect(
       /active.*non-commented|non-commented.*key|lines starting with `#`.*comments|ignore commented/i.test(phaseRegion),
       "Phase 0.0 config matching must require an ACTIVE (non-commented) `plan_output:` key, not a raw-text 'contains' match. Without this, the shipped config template's commented examples would silently force HTML mode.",
     ).toBe(true)
+    // The rationale-citation pin that used to sit here required the always-loaded
+    // body to spell out the shipped template's `# plan_output: html` example. The
+    // invariant it was protecting is the active-key rule asserted just above, which
+    // the shared ce-config-layers block a few lines below Phase 0.0 also states
+    // ("Win with the first active (non-commented) value"). Pin the condition, not
+    // the worked example: the body must say a commented template line is not a
+    // setting, in whatever words.
     expect(
-      /# plan_output: html|commented examples|shipped config template/i.test(phaseRegion),
-      "Phase 0.0 must cite the specific failure mode (the shipped template's commented `# plan_output: html` example) so the rationale survives future edits.",
+      /(commented|template)[^.\n]{0,80}(are not settings|is not a setting|not an active setting)|(not settings|not an? (active )?setting)[^.\n]{0,80}(commented|template)/i.test(
+        phaseRegion,
+      ),
+      "Phase 0.0 must say that a commented `plan_output:` line is not an active setting — otherwise the shipped template's examples silently force HTML mode.",
     ).toBe(true)
     expect(
       /ordinary-key|next layer|config\.local\.yaml then `config\.yaml`/i.test(phaseRegion),
@@ -158,39 +201,27 @@ describe("ce-plan output:html mode", () => {
     // hardcoding "defaulting to md" in the unknown-value note is wrong when
     // step 2 (config) or step 4 (pipeline override) resolves to a different
     // value. The note must reflect the actual final value, not anticipate one.
-    const phaseStart = SKILL_BODY.indexOf("#### 0.0")
-    const phaseRegion = SKILL_BODY.slice(phaseStart, phaseStart + 4500)
+    const phaseStart = OUTPUT_MODE_BODY.indexOf("## 0.0")
+    const phaseRegion = OUTPUT_MODE_BODY.slice(phaseStart)
     expect(
       /using <resolved_format>|reflect.*final.*mode|after final resolution|after steps 2-4|Do not hardcode `md`/i.test(phaseRegion),
       "Phase 0.0's unknown-value note must reflect the actual resolved OUTPUT_FORMAT after all precedence steps, not a hardcoded 'defaulting to md' that misleads users when config has set HTML.",
     ).toBe(true)
   })
 
-  test("Phase 5.2 names the HTML/ce-doc-review timing relationship", () => {
-    // Composition timing rule: Phase 5.2 must surface the relationship between
-    // HTML emission and ce-doc-review so an agent doesn't ship a pre-review
-    // artifact without understanding the gap. ce-doc-review's mutation mechanics
-    // are markdown-only today (its walkthrough applies single-file markdown
-    // edits and the open-questions flow inserts `##`/`###` headings), so HTML
-    // plans skip the 5.3.8 doc-review pass entirely — see plan-handoff.md format
-    // gate. Phase 5.2 must reference that gap inline at the write phase, either
-    // by naming the format gate, calling out that ce-doc-review is skipped on
-    // HTML, or otherwise tying the two phases together so the agent knows what
-    // the first HTML emission does and does not reflect.
-    const phase52Start = SKILL_BODY.indexOf("#### 5.2 Write Plan File")
+  test("Phase 5.2 sends both output formats through ce-doc-review", () => {
+    const phase52Start = FINAL_REVIEW_BODY.indexOf("#### 5.2 Write Plan File")
     expect(phase52Start).toBeGreaterThan(-1)
-    const phase52Region = SKILL_BODY.slice(phase52Start, phase52Start + 2000)
+    const phase52Region = FINAL_REVIEW_BODY.slice(phase52Start, phase52Start + 2000)
     expect(
-      /skipped in HTML|markdown-only|format gate|Phase 5\.3\.8|safe_auto|after.*ce-doc-review/i.test(
-        phase52Region,
-      ),
-      "Phase 5.2 must surface the HTML/ce-doc-review relationship inline — either naming the 5.3.8 format gate that skips ce-doc-review on HTML, or stating that ce-doc-review is markdown-only today, so an agent composing the HTML knows what the artifact does and does not reflect.",
+      /both formats|markdown and HTML|native format/i.test(phase52Region),
+      "Phase 5.2 must state that markdown and HTML both continue through ce-doc-review in their native format.",
     ).toBe(true)
   })
 
   test("Phase 0.0 points at format-rendering refs based on resolved value", () => {
-    const phaseStart = SKILL_BODY.indexOf("#### 0.0")
-    const phaseRegion = SKILL_BODY.slice(phaseStart, phaseStart + 4500)
+    const phaseStart = OUTPUT_MODE_BODY.indexOf("## 0.0")
+    const phaseRegion = OUTPUT_MODE_BODY.slice(phaseStart)
     expect(
       /references\/markdown-rendering\.md|markdown-rendering\.md/i.test(phaseRegion),
       "Phase 0.0 must point at markdown-rendering.md for md output mode.",
@@ -201,26 +232,26 @@ describe("ce-plan output:html mode", () => {
     ).toBe(true)
   })
 
-  test("post-generation menu offers format-keyed option 4 (Proof for md, browser for html)", () => {
-    // Under exclusive output mode, the plan is exactly one artifact — either
-    // .md or .html. The menu's option 4 is format-keyed: Proof for md (Proof
-    // operates on markdown), browser for html. The legacy mutual-exclusion
-    // gate with sibling-rerender logic is gone.
-    const phaseStart = SKILL_BODY.indexOf("##### 5.3.8")
+  test("post-generation menu offers prototype and browser for HTML, not Proof", () => {
+    const phaseStart = HANDOFF_BODY.indexOf("## 5.4 Post-Generation Options")
     expect(phaseStart).toBeGreaterThan(-1)
-    const phaseRegion = SKILL_BODY.slice(phaseStart)
+    const phaseRegion = HANDOFF_BODY.slice(phaseStart)
 
     expect(
       /Open in browser/.test(phaseRegion),
-      "SKILL.md Phase 5.4 menu must include 'Open in browser' option for HTML mode.",
+      "plan-handoff.md Phase 5.4 menu must include 'Open in browser' for HTML mode.",
+    ).toBe(true)
+    expect(
+      /Prototype a remaining feel-question/.test(phaseRegion),
+      "plan-handoff.md Phase 5.4 menu must include the prototype offer.",
     ).toBe(true)
     expect(
       /Publish to Proof/.test(phaseRegion),
-      "SKILL.md Phase 5.4 menu must include 'Publish to Proof' option for markdown mode.",
-    ).toBe(true)
+      "software plan Phase 5.4 must omit Share to Proof.",
+    ).toBe(false)
     expect(
-      /OUTPUT_FORMAT=md|OUTPUT_FORMAT=html|format-keyed/i.test(phaseRegion),
-      "SKILL.md must state the format-keyed rendering rule for option 4.",
+      /OUTPUT_FORMAT=html/i.test(phaseRegion),
+      "plan-handoff.md must state HTML-only browser rendering.",
     ).toBe(true)
   })
 
@@ -229,14 +260,14 @@ describe("ce-plan output:html mode", () => {
     // state exclusivity ("md OR html, never both") so a future maintainer
     // doesn't re-introduce sibling generation.
     expect(
-      /exclusive|md OR html|markdown OR HTML|never both/i.test(SKILL_BODY),
-      "SKILL.md must state that output mode is exclusive — markdown OR HTML, never both. Defends against re-introducing the sibling model.",
+      /exclusive|md OR html|markdown OR HTML|never both/i.test(OUTPUT_MODE_BODY),
+      "output-mode.md must state that output mode is exclusive — markdown OR HTML, never both.",
     ).toBe(true)
     // OUTPUT_FORMAT_SOURCE was used by the sibling tracking; it should not
     // re-appear.
     expect(
-      /OUTPUT_FORMAT_SOURCE/.test(SKILL_BODY),
-      "SKILL.md must not reference OUTPUT_FORMAT_SOURCE — the source-tracking variable existed only to support sibling-rerender logic which is removed under exclusive output mode.",
+      /OUTPUT_FORMAT_SOURCE/.test(SKILL_BODY + OUTPUT_MODE_BODY + HANDOFF_BODY),
+      "The ce-plan kernel and output/handoff owners must not reference OUTPUT_FORMAT_SOURCE.",
     ).toBe(false)
   })
 

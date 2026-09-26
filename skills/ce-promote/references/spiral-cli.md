@@ -31,11 +31,11 @@ When Spiral is unauthed or absent, offer setup once. First check the opt-out so 
 - **Do not** use this rule for `docs_root` — that key is `config.yaml` only.
 <!-- ce-config-layers:end -->
 
-Resolve the repo root (never CWD), then apply the ordinary-key rule above for `ce_promote_spiral_optout`. If the winning **uncommented** top-level value is exactly `true`, **skip Path 0** and go straight to Path B. **Ignore commented lines** — `ce-setup`'s template ships a `# ce_promote_spiral_optout: true` example, and a commented line is documentation, not an opt-out (a naive substring match would wrongly suppress the offer for any project that accepted the default template). Otherwise, offer setup.
+Resolve the repo root (never CWD), then apply the ordinary-key rule above for `ce_promote_spiral_optout`. If the winning **uncommented** top-level value is exactly `true`, **skip Path 0** and go straight to Path B (draft the post directly, without the Spiral CLI). **Ignore commented lines** — `ce-setup`'s template ships a `# ce_promote_spiral_optout: true` example, and a commented line is documentation, not an opt-out (a naive substring match would wrongly suppress the offer for any project that accepted the default template). Otherwise, offer setup.
 
 ### Ask
 
-Use the platform's blocking-question tool: `AskUserQuestion` in Claude Code (call `ToolSearch` with `select:AskUserQuestion` first if its schema isn't loaded), `request_user_input` in Codex, `ask_question` in Antigravity CLI (`agy`) / Pi. If no blocking tool exists or the call errors, present the same options as a numbered list in chat and wait for a reply — never silently skip.
+Use the host's blocking question tool already in the current tool list (match by capability, not by a host-specific name). Presence in the current tool list is proof the tool exists; never call a user-facing question tool to discover whether it exists. If a matching tool is listed but unloaded, use the host's tool-discovery primitive to load that capability — do not search for another host's tool name. If no such tool is in the list or a real question call errors, present the same options as a numbered list in chat and wait for a reply — never silently skip.
 
 For the **unauthed** state, the **agent itself** runs `spiral login --json` (CLI >= 1.8.0): it's non-blocking and the API key never passes through the agent — the agent shares the returned `auth_url`, the user approves in a browser, and the credential is delivered server->CLI. The blocking question is mainly the escape hatch.
 

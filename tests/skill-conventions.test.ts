@@ -1,6 +1,7 @@
-import { readdirSync, readFileSync, statSync, type Dirent } from "fs"
+import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from "fs"
 import path from "path"
 import { describe, expect, test } from "bun:test"
+import { load } from "js-yaml"
 import { parseFrontmatter } from "../src/utils/frontmatter"
 
 const ROOT_AGENTS = readFileSync(path.join(process.cwd(), "AGENTS.md"), "utf8")
@@ -101,10 +102,17 @@ const ROOT_README = readFileSync(path.join(process.cwd(), "README.md"), "utf8")
  *    byte cap on skill bodies. The line guidance is advice, not a constraint —
  *    several skills in this plugin are large by design, and gating guidance
  *    would tax every deliberately-large skill with exemption-list ceremony.
- *    The "8KB Codex body cap" that circulates in ecosystem lint tooling turned
- *    out to be folklore: Codex's real limit is an ~8,000-character budget on
- *    the injected skills metadata LIST, while full SKILL.md bodies are read
- *    from disk on demand (see the note in tests/real-plugin-conversion.test.ts).
+ *    The "8KB Codex body cap" that circulates in ecosystem lint tooling is
+ *    not a universal body cap, and it is not from the Agent Plugins spec,
+ *    which imposes no size limit of any kind. On the legacy (schema-less)
+ *    path Codex reads full SKILL.md bodies from disk on demand and only
+ *    budgets the injected skills metadata LIST (see
+ *    tests/real-plugin-conversion.test.ts). It IS a real 8000-byte body
+ *    truncation on the Agent Plugins path (Codex >= 0.147), which is why
+ *    tests/codex-skill-prompt-budget.test.ts ratchets every skill under it as
+ *    a standing goal -- that test owns the size gate, not this one, and its
+ *    header carries the full provenance including Claude Code's separate
+ *    5,000-token auto-compaction bound.
  *
  * 4. PLATFORM-VARIABLE FALLBACK (AGENTS.md "Platform-Specific Variables in
  *    Skills"): skill markdown using harness variables (${CLAUDE_*},
@@ -188,6 +196,9 @@ const EXPECTED_USER_INVOKED_SKILLS = new Set([
   "ce-setup",
   "ce-sweep",
   "ce-test-xcode",
+  // wtf: answers a user who says they did not follow something. No skill or
+  // pipeline calls it, and model-routing it would re-explain replies unasked.
+  "wtf",
 ])
 
 const REQUIRED_MODEL_INVOKED_CALLEES = new Set([
@@ -200,9 +211,11 @@ const REQUIRED_MODEL_INVOKED_CALLEES = new Set([
   "ce-debug",
   "ce-doc-review",
   "ce-ideate",
+  "ce-noslop",
   "ce-optimize",
   "ce-plan",
   "ce-proof",
+  "ce-prototype",
   "ce-resolve-pr-feedback",
   "ce-riffrec-feedback-analysis",
   "ce-simplify-code",
@@ -234,6 +247,7 @@ function listSkillDirs(): SkillDir[] {
   for (const entry of skillEntries) {
     if (!entry.isDirectory()) continue
     const absPath = path.join(SKILLS_ROOT, entry.name)
+    if (!existsSync(path.join(absPath, "SKILL.md"))) continue
     out.push({ relPath: path.relative(REPO_ROOT, absPath), absPath })
   }
   return out
@@ -251,6 +265,32 @@ function listMarkdownFiles(dir: string): string[] {
   }
   return out
 }
+
+describe("removed shared skill-context workaround", () => {
+  test("does not return to the shipped skill corpus", () => {
+    const contextScripts = listSkillDirs()
+      .map((skill) => path.join(skill.absPath, "scripts", "context.mjs"))
+      .filter((candidate) => {
+        try {
+          return statSync(candidate).isFile()
+        } catch {
+          return false
+        }
+      })
+
+    const staleDirectiveMentions = listSkillDirs().flatMap((skill) =>
+      listMarkdownFiles(skill.absPath).flatMap((file) => {
+        const body = readFileSync(file, "utf8")
+        return ["SUBAGENT_AUTHORIZATION:", "CE_CONTEXT_END"]
+          .filter((token) => body.includes(token))
+          .map((token) => `${path.relative(REPO_ROOT, file)}: ${token}`)
+      }),
+    )
+
+    expect(contextScripts.map((file) => path.relative(REPO_ROOT, file))).toEqual([])
+    expect(staleDirectiveMentions).toEqual([])
+  })
+})
 
 // ---------------------------------------------------------------------------
 // Scanning helpers (pure; unit-tested at the bottom of this file)
@@ -665,6 +705,71 @@ describe("portable skill capability wording", () => {
       "Skills should describe blocking-question and subagent capabilities without adding oh-my-pi-specific tool names.",
     ).toEqual([])
   })
+
+  // Issue #1522: Grok's native ask_user_question is already in the tool list,
+  // but a closed Claude/Codex/Antigravity/Pi catalog plus
+  // `ToolSearch select:AskUserQuestion` made agents test-fire user-facing
+  // question cards to "prove" the tool exists. Pin the defect signatures,
+  // not a fifth host name.
+  test("blocking-question instructions do not discover the tool by a closed host catalog or by executing a user-facing call", () => {
+    const closedCatalog =
+      /AskUserQuestion[\s\S]{0,280}request_user_input[\s\S]{0,200}ask_question[\s\S]{0,160}`ask_user`/
+    const claudeSelect = /select:AskUserQuestion/
+    // Bulk catalog→capability replacements that drop a parenthesized name
+    // leave `()` as a mid-sentence call fragment (`() with two options`,
+    // `(), fall back`). Pin the leftover, not a host name.
+    const leftoverEmptyCall = /tool name\.\s*\(\)|\(\)\s*(?:with two options|, fall back)/
+    const offenders: string[] = []
+    for (const skill of skillDirs) {
+      for (const filePath of listMarkdownFiles(skill.absPath)) {
+        const fileRel = path.relative(REPO_ROOT, filePath)
+        const content = readFileSync(filePath, "utf8")
+        if (claudeSelect.test(content)) {
+          offenders.push(
+            `${fileRel}: ToolSearch select:AskUserQuestion used as portable discovery`,
+          )
+        }
+        if (closedCatalog.test(content)) {
+          offenders.push(
+            `${fileRel}: closed AskUserQuestion/request_user_input/ask_question/ask_user catalog`,
+          )
+        }
+        if (leftoverEmptyCall.test(content)) {
+          offenders.push(
+            `${fileRel}: leftover empty () after catalog-name replacement`,
+          )
+        }
+      }
+    }
+
+    expect(
+      offenders,
+      "Ask via the host's blocking question tool already in the current tool list. Do not name a closed per-host catalog, and do not use Claude's ToolSearch select:AskUserQuestion as the discovery path (issue #1522).",
+    ).toEqual([])
+  })
+
+  test("adapter copies that fall back from a blocking question tool treat the current list as proof and forbid user-facing probes", () => {
+    const useAndFallback =
+      /blocking[- ]question[\s\S]{0,1200}Fall back to (?:a )?numbered|Fall back to (?:a )?numbered[\s\S]{0,1200}blocking[- ]question/i
+    const proof =
+      /already in the (?:current )?tool list|presence in the (?:current )?tool list is proof|never call a user-facing question tool to discover/i
+    const offenders: string[] = []
+    for (const skill of skillDirs) {
+      for (const filePath of listMarkdownFiles(skill.absPath)) {
+        const fileRel = path.relative(REPO_ROOT, filePath)
+        const content = readFileSync(filePath, "utf8")
+        if (!useAndFallback.test(content)) continue
+        if (!proof.test(content)) {
+          offenders.push(fileRel)
+        }
+      }
+    }
+
+    expect(
+      offenders,
+      "A blocking-question adapter must say the current tool list is proof and must forbid test-firing a user-facing question tool (issue #1522).",
+    ).toEqual([])
+  })
 })
 
 describe("skill self-containment (AGENTS.md 'File References in Skills')", () => {
@@ -759,6 +864,31 @@ describe("skill frontmatter limits (Anthropic skill spec)", () => {
     expect(
       disabledRequiredCallees,
       `These skills must remain model-invoked because pipelines or sibling skills call them:\n${disabledRequiredCallees.join("\n")}`,
+    ).toEqual([])
+  })
+
+  // Codex ignores the frontmatter flag; its opt-out is the skill's own
+  // agents/openai.yaml. The two must agree, or a manual-only skill stays
+  // implicitly invocable on Codex, or a callee vanishes from Codex's catalog.
+  test("Codex implicit-invocation policy mirrors disable-model-invocation", () => {
+    const mismatched: string[] = []
+    for (const skill of skillDirs) {
+      const skillMdPath = path.join(skill.absPath, "SKILL.md")
+      const { data } = parseFrontmatter(readFileSync(skillMdPath, "utf8"), skillMdPath)
+      const userInvoked = data["disable-model-invocation"] === true
+
+      const policyPath = path.join(skill.absPath, "agents", "openai.yaml")
+      const manifest = existsSync(policyPath)
+        ? (load(readFileSync(policyPath, "utf8")) as { policy?: { allow_implicit_invocation?: unknown } } | null)
+        : null
+      const codexOptedOut = manifest?.policy?.allow_implicit_invocation === false
+
+      if (userInvoked !== codexOptedOut) mismatched.push(path.basename(skill.absPath))
+    }
+
+    expect(
+      mismatched,
+      `disable-model-invocation: true and agents/openai.yaml policy.allow_implicit_invocation: false must be set together:\n${mismatched.join("\n")}`,
     ).toEqual([])
   })
 
@@ -1363,6 +1493,49 @@ describe("python interpreter resolution (no bare python3 invocations)", () => {
       findBarePython3Invocations(
         'Never write inline scripts (`python3 -c`, `node -e`) to process issue data.',
       ),
+    ).toEqual([])
+  })
+})
+
+describe("review coverage fallback wording (issue #1732)", () => {
+  const RECOVERY = path.join(
+    REPO_ROOT,
+    "skills/ce-code-review/references/cross-model-recovery.md",
+  )
+  const PINNED_WORDING = "adversarial lens: in-process fallback"
+
+  test("did-not-run fallback branch pins the exact in-process Coverage wording", () => {
+    const content = readFileSync(RECOVERY, "utf8")
+    const fullForm =
+      /adversarial lens: in-process fallback \(cross-model peer not run: [^)]+\)/.test(
+        content,
+      ) && content.includes("peer.outcome: in-process-fallback")
+    expect(
+      fullForm,
+      `cross-model-recovery.md must pin the exact Coverage wording \`${PINNED_WORDING} (cross-model peer not run: <reason>)\` so a complete review is never reported with ce-work's ship-gate skip phrase (issue #1732).`,
+    ).toBe(true)
+  })
+
+  test("ce-code-review Coverage guidance never uses the ship-gate skip phrase", () => {
+    const skill = skillDirs.find((s) => s.relPath === "skills/ce-code-review")
+    if (!skill) throw new Error("skills/ce-code-review not found")
+    const offenders: string[] = []
+    for (const filePath of listMarkdownFiles(skill.absPath)) {
+      const fileRel = path.relative(REPO_ROOT, filePath)
+      const lines = readFileSync(filePath, "utf8").split("\n")
+      for (const [index, line] of lines.entries()) {
+        // The one legitimate occurrence names the phrase to forbid it
+        // (cross-model-recovery.md's "Never write `harness-native fallback`"):
+        // strip exactly that clause so the rest of the line is still checked.
+        const checked = line.replace(/never write `harness-native fallback`/i, "")
+        if (/harness-native fallback/i.test(checked)) {
+          offenders.push(`${fileRel}:${index + 1}`)
+        }
+      }
+    }
+    expect(
+      offenders,
+      "`harness-native fallback` is ce-work's ship-gate signal for a review that ran without ce-code-review; ce-code-review Coverage guidance must not reuse it for the in-process fallback (issue #1732).",
     ).toEqual([])
   })
 })

@@ -40,7 +40,7 @@ When you add a guard to preserve user content against a destructive writer, trea
 
 Silent user-data loss is the worst failure class for an installer: no error, and the run actively logs reassurance ("existing user-managed symlink (not overwritten)") while a different code path deletes the same override moments later. A partial guard is arguably worse than no guard because the warning manufactures false confidence.
 
-The failure mode is structural, not a one-off: a resource protected against operation A is still exposed to sibling operations B and C that touch it independently. This plugin has the exact shape waiting in two more writers — `src/targets/codex.ts` (`cleanupCurrentManagedSkillDir`) and `src/targets/managed-artifacts.ts` (`cleanupCurrentManagedDirectory`, used by the OpenCode writer) share the unconditional rm-then-copy pattern and would clobber symlinks the same way. Naming them keeps the completeness obligation visible for the next fix.
+The failure mode is structural, not a one-off: a resource protected against operation A is still exposed to sibling operations B and C that touch it independently. Codex (`src/targets/codex.ts`) and managed-artifacts (`src/targets/managed-artifacts.ts`, used by the OpenCode writer) now share `moveLegacyArtifactToBackup` and `isPreservedSymlink` with the Pi writer — the completeness obligation was applied. Keep that choke-point: any new destructive path must go through the same helper, not a fresh unconditional rm-then-copy.
 
 ## When to Apply
 
@@ -77,5 +77,4 @@ expect(await exists(path.join(outputRoot, "compound-engineering", "legacy-backup
 That false-green assertion earned its keep on the first run: an em-dash mismatch in the fork's description made ownership return `false`, which the assertion caught — otherwise the test would have "passed" without exercising the guard at all.
 
 ## Related
-- [A correctness cache needs a COMPLETE, schema-derived invalidation input set](cache-invalidation-input-set-completeness.md) — sibling pattern: a safety-relevant set (there, invalidation inputs) that must be complete, with the gap found by adversarial review.
 - Issue #1048 (repro) and PR #1089 (merged), which fixed both the main-loop clobber and — as a follow-up commit on the same branch — the legacy-sweep gap described here.

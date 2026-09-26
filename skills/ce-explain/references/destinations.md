@@ -1,16 +1,18 @@
-# Destination Sub-flows
+# Requested Destinations
 
-Per-destination mechanics for Phase 6. The menu itself and the one-line action per option live inline in SKILL.md — this file carries only the elaborate sub-flows. Detection is by capability: probe the current session's tools and context; a missing binary, env var, or unloaded MCP tool is not proof of absence when a connector could supply the capability. Local file is the always-present floor.
+Load only when delivery to a destination was requested. Use the available capability for that destination and verify the resulting file, URL, or document reference. A calling workflow that owns the surrounding artifact also owns placement and publication; return the explanation to it instead.
+
+Resolve only the destination information needed to complete the request. Do not require a menu or offer to rewrite or improve the explanation. Adapt the content for its intended reader before asking for any required consent to publish it. On a delivery failure, preserve the canonical local artifact and report what did not complete. Do not substitute another publisher without authorization.
 
 ## Claude Artifact
 
-Offered for HTML output when the session is Claude Code and its Artifact tool is present. Give the tool the canonical `$RUN_DIR/explainer.html`, follow its current contract, and confirm the returned URL or reference to the user. The tool owns any adaptation needed for its artifact runtime; do not pre-process the HTML for it.
+Available for HTML output when the session is Claude Code and its Artifact tool is present. Give the tool the canonical `$RUN_DIR/explainer.html`, follow its current contract, and confirm the returned URL or reference to the user. The tool owns any adaptation needed for its artifact runtime; do not pre-process the HTML for it.
 
 ## Publish publicly to ht-ml.app
 
 This is the preferred HTML publisher when the Claude Artifact adapter is not selected. ht-ml.app accepts the complete standalone HTML document and works through ordinary HTTP, independent of the agent harness.
 
-Before publishing, the destination option itself must state: **the page is public and may be indexed, crawled, copied, or archived**. Whenever ht-ml.app is chosen without that warned option in front of the user — their initial request selected it and the menu was skipped, or they named it after the one-preferred-publisher rule kept it off a menu that *was* shown — state the same full warning in chat and ask for explicit confirmation after the warning before any publish; “this is public” is not the complete warning, and the initial request itself does not count as confirmation. Only a warned menu selection or explicit post-warning confirmation permits publishing. If confirmation cannot be obtained, do not publish; preserve the canonical `$RUN_DIR/explainer.html` and report its local path. Never publish headlessly or infer consent from the fact that an explainer was requested. If the content is sensitive, route to Local file instead.
+Before publishing, state that **the page is public and may be indexed, crawled, copied, or archived** and obtain explicit confirmation after that warning for the actual artifact being sent. The initial request itself does not count as confirmation. Confirmation given after the warning covers the same artifact. If the artifact changes materially, obtain confirmation for the changed content. If confirmation cannot be obtained, do not publish; preserve the canonical `$RUN_DIR/explainer.html` and report its local path. Never publish headlessly. If the content is sensitive, keep it local.
 
 After the user selects the warned option or explicitly confirms after the warning:
 
@@ -20,9 +22,9 @@ After the user selects the warned option or explicitly confirms after the warnin
 
 ## Local file
 
-1. Ask nothing extra if the user already named a path; otherwise accept the path from their menu answer's free-text.
+1. Ask nothing extra if the user already named a path; otherwise ask for the missing path under the skill body's interaction rule.
 2. Copy the artifact out of the run dir to that path (`cp "$RUN_DIR/explainer.html" <path>` — or `explainer.md` for a markdown run), creating parent directories if needed.
-3. Where the platform exposes a browser-opening primitive (`open` on macOS, `xdg-open` on Linux, `start` on Windows), offer to open it; otherwise print the absolute path.
+3. Report the absolute path. Open it when requested and the host supports that action.
 
 ## Publish to Proof (markdown output only)
 

@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import {
   mkdtempSync,
@@ -13,6 +13,10 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
+
+// These tests spawn bash/python/git subprocesses; on a loaded CI runner they cross the 5s default
+// (2026-08-21, PR #1508: three different tests timed out across two reruns with no related change).
+setDefaultTimeout(30_000)
 
 // Every temp root we create, torn down after the suite so runs don't leak dirs.
 const tempRoots: string[] = []
@@ -76,7 +80,7 @@ const SCRIPT = path.join(
   "../../skills/ce-doc-review/scripts/cross-model-doc-review.sh",
 )
 
-const ROUTES = ["codex", "claude", "grok-cli", "grok-cursor", "cursor", "composer"] as const
+const ROUTES = ["codex", "claude", "grok-cli", "grok-cursor", "cursor", "composer", "opencode"] as const
 
 // Flags that must NEVER appear on any route — they would grant the peer write /
 // auto-approve / no-sandbox privileges (R17).
@@ -106,10 +110,12 @@ function emitAdapter(route: string, extraEnv: Record<string, string> = {}): stri
 function sandbox(
   providers: string[],
   stubBody = "#!/bin/sh\nexit 0\n",
+  excludedTools: string[] = [],
 ): { bin: string; env: NodeJS.ProcessEnv } {
   const bin = path.join(mkTempRoot("xmodel-sandbox-"), "bin")
   mkdirSync(bin, { recursive: true })
   for (const [tool, real] of realToolPaths()) {
+    if (excludedTools.includes(tool)) continue
     if (existsSync(path.join(bin, tool))) continue
     try {
       symlinkSync(real, path.join(bin, tool))
@@ -122,7 +128,8 @@ function sandbox(
     writeFileSync(f, stubBody)
     chmodSync(f, 0o755)
   }
-  return { bin, env: { ...process.env, PATH: bin } }
+  // Mask any real Codex.app bundle so discovery sees only what the test stages.
+  return { bin, env: { ...process.env, PATH: bin, CROSS_MODEL_CODEX_APP_DIRS: mkTempRoot("xmodel-nobundle-") } }
 }
 
 function makeDoc(body = "# doc\n"): string {
@@ -261,7 +268,7 @@ printf '%s' '{"structured_output":{"reviewer":"adversarial","findings":[],"resid
     expect(cmd).toContain("-s read-only")
     expect(cmd).toContain("--skip-git-repo-check")
     expect(cmd).toContain('model_reasoning_effort="xhigh"')
-    expect(cmd).toContain("gpt-5.6-luna")
+    expect(cmd).toContain("gpt-6-luna")
   })
 
   test("claude: all tools disabled + safe mode + dontAsk + effort high", () => {
@@ -272,12 +279,12 @@ printf '%s' '{"structured_output":{"reviewer":"adversarial","findings":[],"resid
     expect(cmd).toContain("--disable-slash-commands")
     expect(cmd).not.toContain("--bare")
     expect(cmd).toContain("--effort high")
-    expect(cmd).toContain("--model opus")
+    expect(cmd).toContain("--model claude-opus-5-5")
     expect(cmd).toContain("--output-format stream-json")
     expect(cmd).toContain("--verbose")
   })
 
-  test("grok CLI: deny Read + web/subagents off + dontAsk + effort high", () => {
+  test("grok CLI: deny Read + web/subagents off + dontAsk + effort xhigh", () => {
     const cmd = emitAdapter("grok-cli")
     expect(cmd).toContain("--deny Read")
     // Load-bearing with --deny Read: without --verbatim grok offloads a large
@@ -286,8 +293,8 @@ printf '%s' '{"structured_output":{"reviewer":"adversarial","findings":[],"resid
     expect(cmd).toContain("--disable-web-search")
     expect(cmd).toContain("--no-subagents")
     expect(cmd).toContain("--permission-mode dontAsk")
-    expect(cmd).toContain("--effort high")
-    expect(cmd).toContain("--model grok-4.5")
+    expect(cmd).toContain("--effort xhigh")
+    expect(cmd).toContain("--model grok-4.7")
     expect(cmd).toContain("--json-schema")
     expect(cmd).toContain("--output-format json")
     expect(cmd).not.toContain("stream-json")
@@ -302,9 +309,40 @@ printf '%s' '{"structured_output":{"reviewer":"adversarial","findings":[],"resid
       expect(cmd).toContain("--workspace")
       expect(cmd).toContain("--output-format stream-json")
     }
-    expect(emitAdapter("grok-cursor")).toContain("cursor-grok-4.5-high")
+    expect(emitAdapter("grok-cursor")).toContain("grok-4.7-xhigh")
     expect(emitAdapter("cursor")).not.toContain("--model")
     expect(emitAdapter("composer")).toContain("composer-2.5-fast")
+  })
+
+  test.each([
+    { label: "default", overrides: {} },
+    { label: "model", overrides: {
+      CROSS_MODEL_MODEL_OVERRIDE_TARGET: "opencode",
+      CROSS_MODEL_MODEL_OVERRIDE: "openrouter/anthropic/test-model",
+    } },
+    { label: "model and effort", overrides: {
+      CROSS_MODEL_MODEL_OVERRIDE_TARGET: "opencode",
+      CROSS_MODEL_MODEL_OVERRIDE: "openrouter/anthropic/test-model",
+      CROSS_MODEL_EFFORT_OVERRIDE: "high",
+    } },
+  ])("opencode keeps the prompt outside variadic --file ($label)", ({ overrides }) => {
+    const env = overrides as Record<string, string>
+    const cmd = emitAdapter("opencode", env)
+    expect(cmd).toContain("opencode run")
+    expect(cmd).toContain('OPENCODE_CONFIG_CONTENT={"permission":{"edit":"deny","bash":"deny","webfetch":"deny","task":"deny"}}')
+    expect(cmd).toContain("OPENCODE_DISABLE_PROJECT_CONFIG=1")
+    expect(cmd).toContain("--dir <peer-workdir>")
+    expect(cmd).toContain("--format json")
+    expect(cmd).toContain("--file <prompt-file>")
+    const prompt = "Follow the attached brief. Return only schema-shaped JSON."
+    expect(cmd).toContain(prompt)
+    // OpenCode's --file consumes following bare arguments as more attachments.
+    expect(cmd.indexOf(prompt)).toBeLessThan(cmd.indexOf("--file <prompt-file>"))
+    if (env.CROSS_MODEL_MODEL_OVERRIDE) expect(cmd).toContain(`--model ${env.CROSS_MODEL_MODEL_OVERRIDE}`)
+    else expect(cmd).not.toContain("--model")
+    if (env.CROSS_MODEL_EFFORT_OVERRIDE) expect(cmd).toContain(`--variant ${env.CROSS_MODEL_EFFORT_OVERRIDE}`)
+    else expect(cmd).not.toContain("--variant")
+    expect(cmd).not.toContain("--auto")
   })
 
   test("peer cwd/workspace is a per-peer dir separate from the shared fold-in run-dir (R17)", () => {
@@ -347,7 +385,41 @@ describe("cross-model-doc-review provider selection (R7, R15, R16)", () => {
     const all = ["codex", "claude", "grok", "cursor-agent"]
     expect(resolvePeers("claude", "codex,claude,grok,composer", all)).toBe("codex")
     expect(resolvePeers("codex", "codex,claude,grok,composer", all)).toBe("claude")
+    expect(resolvePeers("grok", "codex,claude,grok,composer", all)).toBe("codex")
     expect(resolvePeers("composer", "codex,claude,grok,composer", all)).toBe("codex")
+  })
+
+  test("an app-bundled codex CLI off PATH is discovered (issue #1272)", () => {
+    const bundle = path.join(mkTempRoot("xmodel-bundle-"), "Codex.app", "Contents", "Resources")
+    mkdirSync(bundle, { recursive: true })
+    writeFileSync(path.join(bundle, "codex"), "#!/bin/sh\nexit 0\n")
+    chmodSync(path.join(bundle, "codex"), 0o755)
+    expect(resolvePeers("claude", "codex,claude,grok,composer", [], { CROSS_MODEL_CODEX_APP_DIRS: bundle })).toBe("codex")
+  })
+
+  test("reference states the unset-allowlist contract the script implements", () => {
+    // Regression: without this sentence, hosts read "verify against CROSS_MODEL_PEERS"
+    // + unset allowlist as a fail-closed gate and skipped the pass in non-interactive
+    // runs (ce-plan) claiming no user could sanction egress. Parity with ce-code-review.
+    const ref = readFileSync(
+      path.join(__dirname, "../../skills/ce-doc-review/references/cross-model-review.md"),
+      "utf8",
+    )
+    expect(ref).toContain("`CROSS_MODEL_PEERS` is an optional egress restriction, not a required approval")
+    expect(ref).toContain("when it is unset or empty, no recipient is filtered and the pass proceeds")
+    expect(ref).not.toMatch(/verify every (actual )?recipient against/)
+    const skill = readFileSync(path.join(__dirname, "../../skills/ce-doc-review/SKILL.md"), "utf8")
+    expect(skill).not.toMatch(/verify every (actual )?recipient against/)
+    expect(skill).toContain("unset means unfiltered, not unsanctioned")
+    const twin = readFileSync(path.join(__dirname, "../../skills/ce-code-review/references/cross-model-review.md"), "utf8")
+    expect(twin).toContain("`CROSS_MODEL_PEERS` is an optional egress restriction, not a required approval")
+    expect(twin).not.toMatch(/verify every (actual )?recipient against/)
+    const retryDisclosure = "Retrying the same resolved route retains its existing sanction and disclosure; changing the route or any recipient requires a new resolution, sanction, and disclosure before dispatch."
+    expect(ref).toContain(retryDisclosure)
+    expect(twin).toContain(retryDisclosure)
+    expect(ref).not.toContain("Any host-owned retry uses a newly resolved and disclosed fixed route")
+    expect(twin).not.toContain("A failure may be retried only after resolving, sanctioning, and disclosing a new route")
+    expect(ref).not.toContain("fail-closed-by-default")
   })
 
   test("a front-loaded preference overrides the default order", () => {
@@ -459,6 +531,31 @@ describe("cross-model-doc-review skip paths (R11, R16) — non-blocking, no file
     expect(run(["claude", "codex", "adversarial", "/no/such/doc", "plan", "none", runDir], runDir, env).files).toHaveLength(0)
   })
 
+  test("invalid transient retry delay skips before allocating temp files", () => {
+    const marker = path.join(mkTempRoot("xmodel-doc-mktemp-marker-"), "called")
+    const wrappers = mkTempRoot("xmodel-doc-mktemp-wrapper-")
+    const mktemp = path.join(wrappers, "mktemp")
+    writeFileSync(mktemp, '#!/bin/sh\n: > "$MKTEMP_MARKER"\nexit 1\n')
+    chmodSync(mktemp, 0o755)
+    const { env } = sandbox(["codex"])
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    const r = run(
+      ["claude", "codex", "adversarial", doc, "plan", "none", runDir],
+      runDir,
+      {
+        ...env,
+        PATH: `${wrappers}:${env.PATH}`,
+        MKTEMP_MARKER: marker,
+        CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS: "invalid",
+      },
+    )
+
+    expect(r.code).toBe(0)
+    expect(r.stderr).toContain("transient retry delay must be an integer from 0 to 60; skipping")
+    expect(existsSync(marker)).toBe(false)
+  })
+
   test("surfaces short provider errors without dropping the diagnostic", () => {
     const { env } = sandbox(
       ["claude"],
@@ -495,6 +592,537 @@ describe("cross-model-doc-review skip paths (R11, R16) — non-blocking, no file
     )
     expect(r.stderr).toContain("Not logged in")
     expect(r.stderr).toContain("terminal_reason=api_error")
+  })
+
+  test("retries a provider-overload 529 carried by a structured error message", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-529-counter-"), "count")
+    const payload = JSON.stringify({
+      error: { message: "API Error: 529 Overloaded. This is a server-side issue." },
+    }, null, 2)
+    const body = `#!/bin/sh
+cat >/dev/null
+n=0
+[ ! -f "$COUNTER" ] || n="$(cat "$COUNTER")"
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+if [ "$n" -eq 1 ]; then
+  printf '%s\n%s' 'provider warning before structured error' '${payload}'
+  exit 1
+fi
+printf '%s' '{"structured_output":{"reviewer":"adversarial","findings":[],"residual_risks":[],"deferred_questions":[]}}'
+`
+    const { env } = sandbox(["claude"], body)
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    const r = run(
+      ["codex", "claude", "adversarial", doc, "plan", "none", runDir],
+      runDir,
+      {
+        ...env,
+        COUNTER: counter,
+        CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS: "0",
+      },
+    )
+
+    expect(readFileSync(counter, "utf8")).toBe("2")
+    expect(r.files).toContain("adversarial-claude.json")
+    expect(r.stderr).toContain("provider overload 529; retrying same route once")
+  })
+
+  test("retries a provider-overload 529 carried by a terminal HTTP status", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-http-529-counter-"), "count")
+    const payload = JSON.stringify({
+      type: "error",
+      http_status: 529,
+      error: { type: "overloaded_error", message: "Overloaded" },
+    })
+    const body = `#!/bin/sh
+cat >/dev/null
+n=0
+[ ! -f "$COUNTER" ] || n="$(cat "$COUNTER")"
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+if [ "$n" -eq 1 ]; then
+  printf '%s' '${payload}'
+  exit 1
+fi
+printf '%s' '{"structured_output":{"reviewer":"adversarial","findings":[],"residual_risks":[],"deferred_questions":[]}}'
+`
+    const { env } = sandbox(["claude"], body)
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    const r = run(
+      ["codex", "claude", "adversarial", doc, "plan", "none", runDir],
+      runDir,
+      {
+        ...env,
+        COUNTER: counter,
+        CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS: "0",
+      },
+    )
+
+    expect(readFileSync(counter, "utf8")).toBe("2")
+    expect(r.files).toContain("adversarial-claude.json")
+    expect(r.stderr).toContain("provider overload 529; retrying same route once")
+  })
+
+  test("a later successful terminal envelope supersedes an earlier overload", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-recovered-529-counter-"), "count")
+    const overload = JSON.stringify({
+      type: "error",
+      http_status: 529,
+      error: { type: "overloaded_error", message: "Overloaded" },
+    })
+    const success = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      structured_output: { reviewer: "adversarial", findings: [], residual_risks: [], deferred_questions: [] },
+    })
+    const { env } = sandbox(
+      ["claude"],
+      `#!/bin/sh
+cat >/dev/null
+n=0
+[ ! -f "$COUNTER" ] || n="$(cat "$COUNTER")"
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+printf '%s\n%s\n' '${overload}' '${success}'
+`,
+    )
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    const r = run(
+      ["codex", "claude", "adversarial", doc, "plan", "none", runDir],
+      runDir,
+      {
+        ...env,
+        COUNTER: counter,
+        CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS: "0",
+      },
+    )
+
+    expect(readFileSync(counter, "utf8")).toBe("1")
+    expect(r.files).toContain("adversarial-claude.json")
+  })
+
+  test("Codex completion supersedes an earlier transient error event", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-codex-recovered-529-counter-"), "count")
+    const review = JSON.stringify({
+      reviewer: "adversarial",
+      findings: [],
+      residual_risks: [],
+      deferred_questions: [],
+    })
+    const { env } = sandbox(
+      ["codex"],
+      `#!/bin/sh
+out=''
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '-o' ]; then out="$2"; shift 2; else shift; fi
+done
+cat >/dev/null
+n=0
+[ ! -f "$COUNTER" ] || n="$(cat "$COUNTER")"
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+printf '%s' '${review}' > "$out"
+printf '%s\n%s\n' '{"type":"error","message":"API Error: 529 Overloaded"}' '{"type":"turn.completed","usage":{}}'
+`,
+    )
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    const r = run(
+      ["claude", "codex", "adversarial", doc, "plan", "none", runDir],
+      runDir,
+      {
+        ...env,
+        COUNTER: counter,
+        CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS: "0",
+      },
+    )
+
+    expect(readFileSync(counter, "utf8")).toBe("1")
+    expect(r.files).toContain("adversarial-codex.json")
+  })
+
+  test("retries a Codex plain-text provider 529 from its merged diagnostic log", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-codex-529-counter-"), "count")
+    const body = `#!/bin/sh
+cat >/dev/null
+n=0
+[ ! -f "$COUNTER" ] || n="$(cat "$COUNTER")"
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+if [ "$n" -eq 1 ]; then
+  printf '%s\n%s\n' 'API Error: 529' 'Overloaded' >&2
+  i=0
+  while [ "$i" -lt 10000 ]; do
+    printf '%s\n' 'additional provider diagnostic context' >&2
+    i=$((i + 1))
+  done
+  exit 1
+fi
+printf '%s' '{"reviewer":"adversarial","findings":[],"residual_risks":[],"deferred_questions":[]}'
+`
+    const { env } = sandbox(["codex"], body)
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    const r = run(
+      ["claude", "codex", "adversarial", doc, "plan", "none", runDir],
+      runDir,
+      {
+        ...env,
+        COUNTER: counter,
+        CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS: "0",
+      },
+    )
+
+    expect(readFileSync(counter, "utf8")).toBe("2")
+    expect(r.files).toContain("adversarial-codex.json")
+    expect(r.stderr).toContain("provider overload 529; retrying same route once")
+  })
+
+  test("does not classify Codex JSON review prose as a provider 529", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-codex-529-prose-counter-"), "count")
+    const payload = JSON.stringify({
+      reviewer: "adversarial",
+      findings: [{ section: "X", title: "The document mentions API Error: 529 Overloaded." }],
+      residual_risks: [],
+      deferred_questions: [],
+    }, null, 2)
+    const { env } = sandbox(
+      ["codex"],
+      `#!/bin/sh
+cat >/dev/null
+n=0
+[ ! -f "$COUNTER" ] || n="$(cat "$COUNTER")"
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+printf '%s' '${payload}'
+exit 1
+`,
+    )
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    run(
+      ["claude", "codex", "adversarial", doc, "plan", "none", runDir],
+      runDir,
+      {
+        ...env,
+        COUNTER: counter,
+        CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS: "0",
+      },
+    )
+
+    expect(readFileSync(counter, "utf8")).toBe("1")
+  })
+
+  test("does not combine unrelated plain-text records into a provider overload", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-529-record-counter-"), "count")
+    const { env } = sandbox(
+      ["codex"],
+      `#!/bin/sh
+cat >/dev/null
+n=0
+[ ! -f "$COUNTER" ] || n="$(cat "$COUNTER")"
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+printf '%s\n' 'status: request failed' 'unrelated metric: 529' 'capacity report follows'
+exit 1
+`,
+    )
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    run(["claude", "codex", "adversarial", doc, "plan", "none", runDir], runDir, {
+      ...env,
+      COUNTER: counter,
+      CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS: "0",
+    })
+
+    expect(readFileSync(counter, "utf8")).toBe("1")
+  })
+
+  test("does not combine overload fragments across diagnostic streams", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-529-stream-boundary-counter-"), "count")
+    const { env } = sandbox(
+      ["grok"],
+      `#!/bin/sh
+cat >/dev/null
+n=0
+[ ! -f "$COUNTER" ] || n="$(cat "$COUNTER")"
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+printf '%s' 'API Error: 529'
+printf '%s\n' 'Overloaded' >&2
+exit 1
+`,
+    )
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    run(["claude", "grok", "adversarial", doc, "plan", "none", runDir], runDir, {
+      ...env,
+      COUNTER: counter,
+      CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS: "0",
+    })
+
+    expect(readFileSync(counter, "utf8")).toBe("1")
+  })
+
+  test("retries a successful-process Grok 529 envelope instead of publishing its schema stub", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-grok-529-stub-counter-"), "count")
+    const first = JSON.stringify({
+      api_error_status: 529,
+      structuredOutput: { reviewer: "adversarial", findings: [] },
+    }, null, 2)
+    const second = JSON.stringify({
+      structuredOutput: { reviewer: "adversarial", findings: [], residual_risks: [], deferred_questions: [] },
+    })
+    const { env } = sandbox(
+      ["grok"],
+      `#!/bin/sh
+cat >/dev/null
+n=0
+[ ! -f "$COUNTER" ] || n="$(cat "$COUNTER")"
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+if [ "$n" -eq 1 ]; then printf '%s' '${first}'; else printf '%s' '${second}'; fi
+`,
+    )
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    const r = run(["claude", "grok", "adversarial", doc, "plan", "none", runDir], runDir, {
+      ...env,
+      COUNTER: counter,
+      CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS: "0",
+    })
+
+    expect(readFileSync(counter, "utf8")).toBe("2")
+    expect(r.files).toContain("adversarial-grok.json")
+  })
+
+  test("retries a plain-text Grok 529 from stdout", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-grok-stdout-529-counter-"), "count")
+    const body = `#!/bin/sh
+cat >/dev/null
+n=0
+[ ! -f "$COUNTER" ] || n="$(cat "$COUNTER")"
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+if [ "$n" -eq 1 ]; then
+  printf '%s\n' 'API Error: 529 Overloaded'
+  exit 1
+fi
+printf '%s' '{"structuredOutput":{"reviewer":"adversarial","findings":[],"residual_risks":[],"deferred_questions":[]}}'
+`
+    const { env } = sandbox(["grok"], body)
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    const r = run(["claude", "grok", "adversarial", doc, "plan", "none", runDir], runDir, {
+      ...env,
+      COUNTER: counter,
+      CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS: "0",
+    })
+
+    expect(readFileSync(counter, "utf8")).toBe("2")
+    expect(r.files).toContain("adversarial-grok.json")
+  })
+
+  test("rejects a nonnumeric effective route budget before dispatch", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-hard-budget-counter-"), "count")
+    const { env } = sandbox(
+      ["claude"],
+      `#!/bin/sh
+cat >/dev/null
+printf invoked > "$COUNTER"
+`,
+    )
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    const r = run(
+      ["codex", "claude", "adversarial", doc, "plan", "none", runDir],
+      runDir,
+      { ...env, COUNTER: counter, CROSS_MODEL_HARD_SECS: "oops" },
+    )
+
+    expect(r.code).toBe(0)
+    expect(existsSync(counter)).toBe(false)
+    expect(r.stderr).toContain("peer hard budget must be a positive integer; skipping")
+  })
+
+  test("a missing Python interpreter skips explicitly before provider dispatch", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-python-preflight-counter-"), "count")
+    const { env } = sandbox(
+      ["claude"],
+      `#!/bin/sh
+cat >/dev/null
+printf invoked > "$COUNTER"
+printf '%s' '{"type":"result","subtype":"success","structured_output":{"reviewer":"adversarial","findings":[],"residual_risks":[],"deferred_questions":[]}}'
+`,
+      ["python3"],
+    )
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    const r = run(
+      ["codex", "claude", "adversarial", doc, "plan", "none", runDir],
+      runDir,
+      { ...env, COUNTER: counter },
+    )
+
+    expect(r.code).toBe(0)
+    expect(existsSync(counter)).toBe(false)
+    expect(r.files).not.toContain("adversarial-claude.json")
+    expect(r.stderr).toContain("working Python 3 interpreter required for peer outcome classification; skipping")
+  })
+
+  test("rejects a successful-process Grok 429 envelope instead of publishing its schema stub", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-grok-429-stub-counter-"), "count")
+    const payload = JSON.stringify({
+      api_error_status: 429,
+      terminal_reason: "api_error",
+      structuredOutput: { reviewer: "adversarial", findings: [] },
+    }, null, 2)
+    const { env } = sandbox(
+      ["grok"],
+      `#!/bin/sh
+cat >/dev/null
+n=0
+[ ! -f "$COUNTER" ] || n="$(cat "$COUNTER")"
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+printf '%s' '${payload}'
+`,
+    )
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    const r = run(["claude", "grok", "adversarial", doc, "plan", "none", runDir], runDir, {
+      ...env,
+      COUNTER: counter,
+      CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS: "0",
+    })
+
+    expect(readFileSync(counter, "utf8")).toBe("1")
+    expect(r.files).not.toContain("adversarial-grok.json")
+  })
+
+  test("rejects error statuses even when other terminal fields look successful", () => {
+    const envelopes = [
+      { status: 429 },
+      { error: { status: 429 } },
+      { type: "result", subtype: "success", status: 429 },
+    ]
+    for (const envelope of envelopes) {
+      const payload = JSON.stringify({
+        ...envelope,
+        structured_output: { reviewer: "adversarial", findings: [] },
+      })
+      const { env } = sandbox(
+        ["claude"],
+        `#!/bin/sh
+cat >/dev/null
+printf '%s' '${payload}'
+`,
+      )
+      const doc = makeDoc()
+      const runDir = makeRunDir()
+      const r = run(["codex", "claude", "adversarial", doc, "plan", "none", runDir], runDir, env)
+
+      expect(r.files).not.toContain("adversarial-claude.json")
+    }
+  })
+
+  test("accepts subtype-less result envelopes from Cursor-backed routes", () => {
+    const review = JSON.stringify({
+      reviewer: "adversarial",
+      findings: [],
+      residual_risks: [],
+      deferred_questions: [],
+    })
+    const payload = JSON.stringify({ type: "result", result: review })
+    const routes = [
+      { target: "cursor", route: "cursor", peers: "cursor" },
+      { target: "composer", route: "composer", peers: "composer" },
+      { target: "grok", route: "grok-cursor", peers: "grok,cursor" },
+    ]
+
+    for (const { target, route, peers } of routes) {
+      const { env } = sandbox(
+        ["cursor-agent"],
+        `#!/bin/sh
+cat >/dev/null
+printf '%s' '${payload}'
+`,
+      )
+      const doc = makeDoc()
+      const runDir = makeRunDir()
+      const r = run(["claude", target, "adversarial", doc, "plan", "none", runDir], runDir, {
+        ...env,
+        CROSS_MODEL_FIXED_ROUTE: route,
+        CROSS_MODEL_PEERS: peers,
+      })
+
+      expect(r.files).toContain(`adversarial-${target}.json`)
+    }
+  })
+
+  test("a repeated provider-overload 529 stops after the single retry", () => {
+    const counter = path.join(mkTempRoot("xmodel-doc-529-stop-counter-"), "count")
+    const payload = JSON.stringify({
+      result: "API Error: 529 Overloaded. This is a server-side issue.",
+      api_error_status: 529,
+      terminal_reason: "api_error",
+    })
+    const body = `#!/bin/sh
+cat >/dev/null
+n=0
+[ ! -f "$COUNTER" ] || n="$(cat "$COUNTER")"
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+printf '%s' '${payload}'
+exit 1
+`
+    const { env } = sandbox(["claude"], body)
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    const r = run(
+      ["codex", "claude", "adversarial", doc, "plan", "none", runDir],
+      runDir,
+      {
+        ...env,
+        COUNTER: counter,
+        CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS: "0",
+      },
+    )
+
+    expect(readFileSync(counter, "utf8")).toBe("2")
+    expect(r.files).not.toContain("adversarial-claude.json")
+    expect(r.stderr.match(/retrying same route once/g)).toHaveLength(1)
+  })
+
+  test("rejects a schema-shaped Claude result whose terminal envelope reports max-turn exhaustion", () => {
+    const payload = JSON.stringify({
+      type: "result",
+      subtype: "error_max_turns",
+      is_error: true,
+      structured_output: {
+        reviewer: "adversarial",
+        findings: [],
+        residual_risks: [],
+        deferred_questions: [],
+      },
+    }, null, 2)
+    const { env } = sandbox(
+      ["claude"],
+      `#!/bin/sh
+cat >/dev/null
+printf '%s\n%s' '{"type":"system","subtype":"init"}' '${payload}'
+`,
+    )
+    const doc = makeDoc()
+    const runDir = makeRunDir()
+    const r = run(["codex", "claude", "adversarial", doc, "plan", "none", runDir], runDir, env)
+
+    expect(r.files).not.toContain("adversarial-claude.json")
+    expect(r.stderr).toContain("peer terminal envelope reports failure")
   })
 
   test("ancillary structured fields do not hide an unrecognized human-readable diagnostic", () => {
@@ -592,10 +1220,10 @@ describe("cross-model-doc-review normalization (R18, KTD5)", () => {
 
   test("records model_requested and the dated model_actual when the claude receipt matches (R7)", () => {
     // Real claude CLI envelope shape: modelUsage at the envelope top level, keyed
-    // by the full dated id that actually served the run. Requested alias "opus"
-    // expects a served id starting claude-opus-.
+    // by the full dated id that actually served the run. Requested id "claude-opus-5-5"
+    // expects a served id starting claude-opus-5-5 (undated or dated).
     const receiptStub =
-      `#!/bin/sh\ncat >/dev/null\nprintf '%s' '{"structured_output":{"reviewer":"adversarial","findings":[{"section":"X","title":"t"}]},"modelUsage":{"claude-opus-4-8-20260115":{"inputTokens":10}}}'\n`
+      `#!/bin/sh\ncat >/dev/null\nprintf '%s' '{"structured_output":{"reviewer":"adversarial","findings":[{"section":"X","title":"t"}]},"modelUsage":{"claude-opus-5-5-20260801":{"inputTokens":10}}}'\n`
     const { env } = sandbox(["claude"], receiptStub)
     const doc = makeDoc()
     const runDir = makeRunDir()
@@ -605,9 +1233,26 @@ describe("cross-model-doc-review normalization (R18, KTD5)", () => {
       readFileSync(path.join(runDir, "adversarial-claude.json"), "utf8"),
     )
     expect(out.cross_model_route).toBe("claude")
-    expect(out.model_requested).toBe("opus")
-    expect(out.model_actual).toBe("claude-opus-4-8-20260115")
+    expect(out.model_requested).toBe("claude-opus-5-5")
+    expect(out.model_actual).toBe("claude-opus-5-5-20260801")
+    expect(out.effort_requested).toBe("high")
     expect(r.stderr).not.toContain("model mismatch")
+  })
+
+  test("a valid effort override is recorded as effort_requested and an invalid one skips the pass", () => {
+    const { env } = sandbox(["claude"], claudeStub)
+    const doc = makeDoc()
+    let dir = makeRunDir()
+    let r = run(["codex", "claude", "adversarial", doc, "plan", "none", dir], dir, { ...env, CROSS_MODEL_EFFORT_OVERRIDE: "xhigh" })
+    expect(r.files).toContain("adversarial-claude.json")
+    const out = JSON.parse(readFileSync(path.join(dir, "adversarial-claude.json"), "utf8"))
+    expect(out.effort_requested).toBe("xhigh")
+    expect(r.stderr).toContain("(effort xhigh)")
+
+    dir = makeRunDir()
+    r = run(["codex", "claude", "adversarial", doc, "plan", "none", dir], dir, { ...env, CROSS_MODEL_EFFORT_OVERRIDE: "minimal" })
+    expect(r.files).not.toContain("adversarial-claude.json")
+    expect(r.stderr).toContain("effort override 'minimal' not compatible with route 'claude'; skipping")
   })
 
   test("multi-key receipt: prefers the requested-family key over the alphabetically-first auxiliary key (R7)", () => {
@@ -616,7 +1261,7 @@ describe("cross-model-doc-review normalization (R18, KTD5)", () => {
     // pick) would choose haiku; the prefix match must select the opus key and
     // raise no mismatch warning.
     const multiKeyStub =
-      `#!/bin/sh\ncat >/dev/null\nprintf '%s' '{"structured_output":{"reviewer":"adversarial","findings":[{"section":"X","title":"t"}]},"modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":2},"claude-opus-4-8-20260115":{"inputTokens":10}}}'\n`
+      `#!/bin/sh\ncat >/dev/null\nprintf '%s' '{"structured_output":{"reviewer":"adversarial","findings":[{"section":"X","title":"t"}]},"modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":2},"claude-opus-5-5-20260801":{"inputTokens":10}}}'\n`
     const { env } = sandbox(["claude"], multiKeyStub)
     const doc = makeDoc()
     const runDir = makeRunDir()
@@ -625,8 +1270,8 @@ describe("cross-model-doc-review normalization (R18, KTD5)", () => {
     const out = JSON.parse(
       readFileSync(path.join(runDir, "adversarial-claude.json"), "utf8"),
     )
-    expect(out.model_requested).toBe("opus")
-    expect(out.model_actual).toBe("claude-opus-4-8-20260115")
+    expect(out.model_requested).toBe("claude-opus-5-5")
+    expect(out.model_actual).toBe("claude-opus-5-5-20260801")
     expect(r.stderr).not.toContain("model mismatch")
   })
 
@@ -642,9 +1287,9 @@ describe("cross-model-doc-review normalization (R18, KTD5)", () => {
     const out = JSON.parse(
       readFileSync(path.join(runDir, "adversarial-claude.json"), "utf8"),
     )
-    expect(out.model_requested).toBe("opus")
+    expect(out.model_requested).toBe("claude-opus-5-5")
     expect(out.model_actual).toBe("claude-haiku-4-5-20251001")
-    expect(r.stderr).toContain("WARNING: model mismatch - requested opus, backend served claude-haiku-4-5-20251001")
+    expect(r.stderr).toContain("WARNING: model mismatch - requested claude-opus-5-5, backend served claude-haiku-4-5-20251001")
   })
 
   test("records model_actual unverified with a parse warning when the claude envelope carries no receipt (R8)", () => {
@@ -658,7 +1303,7 @@ describe("cross-model-doc-review normalization (R18, KTD5)", () => {
     const out = JSON.parse(
       readFileSync(path.join(runDir, "adversarial-claude.json"), "utf8"),
     )
-    expect(out.model_requested).toBe("opus")
+    expect(out.model_requested).toBe("claude-opus-5-5")
     expect(out.model_actual).toBe("unverified")
     expect(r.stderr).toContain("model receipt absent/unparseable on claude route; recording unverified")
   })
@@ -712,7 +1357,7 @@ describe("cross-model-doc-review normalization (R18, KTD5)", () => {
       CROSS_MODEL_MODEL_OVERRIDE: "composer-next",
     }
     expect(emitAdapter("composer", override)).toContain("--model composer-next")
-    expect(emitAdapter("grok-cursor", override)).toContain("--model cursor-grok-4.5-high")
+    expect(emitAdapter("grok-cursor", override)).toContain("--model grok-4.7-xhigh")
     expect(emitAdapter("cursor", override)).not.toContain("--model")
 
     const crossFamily = spawnSync("bash", [SCRIPT, "--emit-adapter", "composer"], {
@@ -720,7 +1365,38 @@ describe("cross-model-doc-review normalization (R18, KTD5)", () => {
       env: {
         ...process.env,
         CROSS_MODEL_MODEL_OVERRIDE_TARGET: "composer",
-        CROSS_MODEL_MODEL_OVERRIDE: "gpt-5.6-sol",
+        CROSS_MODEL_MODEL_OVERRIDE: "gpt-6-sol",
+      },
+    })
+    expect(crossFamily.status).toBe(2)
+    expect(crossFamily.stderr).toContain("not compatible with route")
+  })
+
+  test("a provider-qualified codex model id is accepted; family is still checked", () => {
+    // A codex CLI pointed at a non-default model_provider may require ids in
+    // that provider's own namespace. Measured against the OpenAI-compatible
+    // surface at bedrock-mantle.<region>.api.aws: `gpt-6-luna` 404s there and
+    // `openai.gpt-6-sol` serves. Where that holds, the documented
+    // cross_model_model escape hatch has to be able to express the served form.
+    expect(
+      emitAdapter("codex", {
+        CROSS_MODEL_MODEL_OVERRIDE_TARGET: "codex",
+        CROSS_MODEL_MODEL_OVERRIDE: "openai.gpt-6-sol",
+      }),
+    ).toContain("-m openai.gpt-6-sol")
+    expect(
+      emitAdapter("codex", {
+        CROSS_MODEL_MODEL_OVERRIDE_TARGET: "codex",
+        CROSS_MODEL_MODEL_OVERRIDE: "openai/gpt-6-sol",
+      }),
+    ).toContain("-m openai/gpt-6-sol")
+
+    const crossFamily = spawnSync("bash", [SCRIPT, "--emit-adapter", "codex"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CROSS_MODEL_MODEL_OVERRIDE_TARGET: "codex",
+        CROSS_MODEL_MODEL_OVERRIDE: "bedrock.claude-opus-5-5",
       },
     })
     expect(crossFamily.status).toBe(2)
@@ -742,7 +1418,7 @@ describe("cross-model-doc-review normalization (R18, KTD5)", () => {
       readFileSync(path.join(runDir, "adversarial-codex.json"), "utf8"),
     )
     expect(out.cross_model_route).toBe("codex")
-    expect(out.model_requested).toBe("gpt-5.6-luna")
+    expect(out.model_requested).toBe("gpt-6-luna")
     expect(out.model_actual).toBe("unverified")
   }, 20_000) // the codex liveness poll sleeps in 5s slices even for a fast stub
 

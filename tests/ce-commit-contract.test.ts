@@ -45,7 +45,8 @@ describe("ce-commit contract", () => {
     expect(content).toMatch(/never `git add -A` or `git add \.`/)
     expect(content).toContain("named files")
     expect(content).toContain("git add file1 file2 file3")
-    expect(content).toContain("<<'EOF'")
+    expect(content).toContain("git commit -F <message-file>")
+    expect(content).toContain("-- file1 file2 file3")
   })
 
   test("defaults fix over feat and leads messages with outcome", async () => {
@@ -56,6 +57,9 @@ describe("ce-commit contract", () => {
     expect(content).toMatch(/names the outcome/)
     expect(content).toContain("Fix double-submit on checkout")
     expect(content).toContain("Update checkout.rb")
+    expect(content).toContain("append that unit's U-ID in parentheses — `(U3)` means unit 3")
+    expect(content).toContain("Do not hunt for a plan")
+    expect(content).toContain("Omit when the commit spans units")
   })
 
   test("scopes to local commits and points ship flow at ce-commit-push-pr", async () => {

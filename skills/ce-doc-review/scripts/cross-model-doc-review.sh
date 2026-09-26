@@ -16,12 +16,14 @@
 # on extra-high; composer's -fast tier is its ceiling (accepted exceptions).
 #
 # Usage:
-#   cross-model-doc-review.sh <host-provider> <candidates> <reviewer-name> \
+#   cross-model-doc-review.sh <host-serving-family> <candidates> <reviewer-name> \
 #                             <document-path> <document-type> <origin> <run-dir>
 #
-#   <host-provider> the peer-key of the host's OWN serving provider, attested by
-#                   the calling skill (it knows its harness): openai->codex,
-#                   anthropic->claude, xai->grok, cursor/composer->composer.
+#   <host-serving-family>
+#                   the peer-key of the host's OWN serving family, attested by
+#                   the calling skill (it knows its harness). A peer-key, never
+#                   a provider name: openai->codex, anthropic->claude,
+#                   xai->grok, cursor/composer->composer.
 #                   Excluded from selection when attested. `unknown` is allowed,
 #                   but any returned review remains non-independent and cannot
 #                   promote agreement.
@@ -74,33 +76,68 @@ trap '' HUP
 # Filled while a peer process group is live; TERM/INT handler (installed after
 # reap() is defined) reaps it so an orchestrator kill cannot leave orphans.
 ACTIVE_PEER_PID=""
+PY_BIN=""
 
 log()  { printf '[cross-model-doc] %s\n' "$*" >&2; }
 skip() { log "$*"; exit 0; }   # non-blocking: announce reason, exit clean, no output
+
+TRANSIENT_RETRY_DELAY_SECS="${CROSS_MODEL_TRANSIENT_RETRY_DELAY_SECS:-5}"
+case "$TRANSIENT_RETRY_DELAY_SECS" in ''|*[!0-9]*) skip "transient retry delay must be an integer from 0 to 60; skipping" ;; esac
+[ "$TRANSIENT_RETRY_DELAY_SECS" -le 60 ] || skip "transient retry delay must be an integer from 0 to 60; skipping"
 
 # --- model + reasoning per provider ----------------------------------------
 # ONE model per provider at high reasoning, except codex on extra-high (supersedes
 # the old per-lens sol/terra split). Concrete IDs are the CURRENT instance of the
 # tier principle and the single maintenance point when model families change.
-M_CODEX="gpt-5.6-luna"         # codex CLI            (-c model_reasoning_effort="xhigh")
-M_CLAUDE="opus"                # claude CLI, Opus 4.8 (--effort high)
-M_GROK="grok-4.5"              # grok CLI             (--effort high)
-M_GROK_CURSOR="cursor-grok-4.5-high"  # fixed cursor-agent Grok route (current id)
+# A checkout may override the model (CROSS_MODEL_MODEL_OVERRIDE_TARGET +
+# CROSS_MODEL_MODEL_OVERRIDE, same target/family only) and the reasoning effort
+# (CROSS_MODEL_EFFORT_OVERRIDE, validated per route); both fail closed.
+# codex: luna/xhigh is the benchmarked pick on API dollars (~0.30x sol-medium, tied
+# detection, slower tail) -- docs/solutions/skill-design/benchmark-review-peer-model-and-reasoning-tier.md
+M_CODEX="gpt-6-luna"         # codex CLI            (-c model_reasoning_effort="xhigh")
+M_CLAUDE="claude-opus-5-5"     # claude CLI, Opus 5.5 (--effort high)
+M_GROK="grok-4.7"              # grok CLI             (--effort xhigh)
+M_GROK_CURSOR="grok-4.7-xhigh" # cursor-agent --list-models; 4.7 has no cursor- prefix, effort is in the id
 M_COMPOSER="composer-2.5-fast" # cursor-agent composer (no high tier; -fast is the ceiling)
+
+route_effort() {   # <route> -> requested effort: the override where the route takes one, else editorial
+  if [ -n "${CROSS_MODEL_EFFORT_OVERRIDE:-}" ]; then
+    case "$1" in
+      codex|claude|grok-cli) printf '%s' "$CROSS_MODEL_EFFORT_OVERRIDE"; return 0 ;;
+      opencode)
+        case "$CROSS_MODEL_EFFORT_OVERRIDE" in
+          none|minimal|low|medium|high|xhigh|max|default) printf '%s' "$CROSS_MODEL_EFFORT_OVERRIDE"; return 0 ;;
+        esac
+        ;;
+    esac
+  fi
+  case "$1" in
+    codex|grok-cli) printf 'xhigh' ;;
+    claude) printf 'high' ;;
+    grok-cursor) printf 'model-implied-xhigh' ;;
+    composer) printf 'fast' ;;
+    cursor) printf 'unverified' ;;
+    opencode) printf 'unverified' ;;
+  esac
+}
 
 # --- model-identity receipt (R7/R8) -----------------------------------------
 # "Which model ran" is a claim that needs a serving-side receipt. Only the
 # claude CLI reports one today: its JSON envelope carries a modelUsage object
 # keyed by the full dated id that actually served the run. Match requested vs
-# actual by expected full-family prefix (alias -> dated id counts as a match;
-# never substring). Every other route records the literal "unverified" — never
-# a fallback to the requested value. Keep this block byte-identical across
+# actual by expected family prefix, delimited on "-": the served id must equal
+# the prefix or continue it with "-" (alias or undated id -> dated id counts
+# as a match; a longer sibling such as claude-opus-50-* does not; never
+# substring). Every other route records the literal
+# "unverified" — never a fallback to the requested value. Keep this block byte-identical across
 # ce-code-review and ce-doc-review (kernel parity).
-expected_model_prefix() {   # <requested-alias> -> expected served-id prefix
+expected_model_prefix() {   # <requested-alias-or-id> -> expected served-id family prefix
   case "$1" in
-    opus)   printf 'claude-opus-' ;;
-    sonnet) printf 'claude-sonnet-' ;;
-    haiku)  printf 'claude-haiku-' ;;
+    fable)    printf 'claude-fable' ;;
+    opus)     printf 'claude-opus' ;;
+    sonnet)   printf 'claude-sonnet' ;;
+    haiku)    printf 'claude-haiku' ;;
+    claude-*) printf '%s' "$1" ;;
   esac
 }
 
@@ -120,6 +157,7 @@ route_model() {   # <route> -> the M_* constant that route requests
     grok-cursor) printf '%s' "$M_GROK_CURSOR" ;;
     cursor)      printf 'auto' ;;
     composer)    printf '%s' "$M_COMPOSER" ;;
+    opencode)    printf 'auto' ;;
   esac
 }
 
@@ -127,6 +165,7 @@ route_target() {
   case "$1" in
     codex|claude|cursor|composer) printf '%s' "$1" ;;
     grok-cli|grok-cursor) printf 'grok' ;;
+    opencode) printf 'opencode' ;;
   esac
 }
 
@@ -136,6 +175,7 @@ route_harness() {
     claude) printf 'claude' ;;
     grok-cli) printf 'grok' ;;
     grok-cursor|cursor|composer) printf 'cursor-agent' ;;
+    opencode) printf 'opencode' ;;
   esac
 }
 
@@ -143,6 +183,7 @@ target_serving_family() {
   case "$1" in
     codex|claude|grok|composer) printf '%s' "$1" ;;
     cursor) printf 'unknown' ;;
+    opencode) printf 'unknown' ;;
   esac
 }
 
@@ -165,12 +206,13 @@ extract_model_receipt() {   # <route>; reads the envelope in $PEERLOG, sets MODE
   # requested value).
   matched=""
   if [ -n "$prefix" ]; then
-    # first modelUsage key matching the expected family prefix (jq-native, no
-    # external `head`: the route sandbox may not carry coreutils on PATH).
+    # first modelUsage key equal to, or delimited under, the expected prefix
+    # (jq-native, no external `head`: the route sandbox may not carry coreutils
+    # on PATH).
     if [ -n "$envelope" ]; then
-      matched="$(printf '%s' "$envelope" | jq -r --arg p "$prefix" 'first((.modelUsage // {} | keys[] | select(startswith($p)))) // empty' 2>/dev/null)"
+      matched="$(printf '%s' "$envelope" | jq -r --arg p "$prefix" 'first((.modelUsage // {} | keys[] | select(. == $p or startswith($p + "-")))) // empty' 2>/dev/null)"
     else
-      matched="$(jq -r --arg p "$prefix" 'first((.modelUsage // {} | keys[] | select(startswith($p)))) // empty' "$PEERLOG" 2>/dev/null)"
+      matched="$(jq -r --arg p "$prefix" 'first((.modelUsage // {} | keys[] | select(. == $p or startswith($p + "-")))) // empty' "$PEERLOG" 2>/dev/null)"
     fi
   fi
   if [ -n "$matched" ]; then
@@ -193,7 +235,7 @@ extract_model_receipt() {   # <route>; reads the envelope in $PEERLOG, sets MODE
 # --- adapter argv (single source of truth for route flags) -----------------
 # Emits the CLI + flags one token per line. Read-only, no-prompt, least-privilege
 # (tool-less on claude/grok; read-only residual on codex/cursor-agent), and
-# codex xhigh + others high reasoning per R17. PEER_WORKDIR / RAW_OUT / PROMPT_FILE / SCHEMA_REF are
+# codex and grok xhigh; claude high. PEER_WORKDIR / RAW_OUT / PROMPT_FILE / SCHEMA_REF are
 # resolved by the caller (placeholders in --emit-adapter mode); PEER_WORKDIR is the
 # per-peer empty cwd/workspace, kept separate from the shared fold-in dir RUN_DIR.
 # Peer routes write to RAW_OUT only; the final fold-in file (OUT) is published after normalize so an orphaned
@@ -204,7 +246,7 @@ adapter_argv() {
   case "$1" in
     codex)
       printf '%s\0' codex exec - -C "$PEER_WORKDIR" --skip-git-repo-check -s read-only \
-        -o "$RAW_OUT" -m "$(route_model codex)" -c 'model_reasoning_effort="xhigh"' -c 'hide_agent_reasoning=false'
+        -o "$RAW_OUT" -m "$(route_model codex)" -c "model_reasoning_effort=\"$(route_effort codex)\"" -c 'hide_agent_reasoning=false'
       ;;
     claude)
       # --tools "" disables ALL built-in tools (allowlist deny-all, no denylist gap
@@ -214,7 +256,7 @@ adapter_argv() {
       # the peer has no repo -- or sibling peer's fold-in artifact -- in reach.
       # R17 tool-less isolation.
       # stream-json + --verbose for PEERLOG idle (#1270); schema still composes.
-      printf '%s\0' claude -p --model "$(route_model claude)" --effort high --permission-mode dontAsk \
+      printf '%s\0' claude -p --model "$(route_model claude)" --effort "$(route_effort claude)" --permission-mode dontAsk \
         --safe-mode --disable-slash-commands --tools "" \
         --max-turns 15 --no-session-persistence --json-schema "$SCHEMA_REF" \
         --output-format stream-json --verbose
@@ -223,7 +265,7 @@ adapter_argv() {
       # Schema forces buffered json — hard-only, no PEERLOG idle (#1270).
       # --verbatim: without it grok offloads a large prompt to a session file and
       # sends only a preview — unrecoverable here, because Read is denied below.
-      printf '%s\0' grok --prompt-file "$PROMPT_FILE" --verbatim --model "$(route_model grok-cli)" --effort high \
+      printf '%s\0' grok --prompt-file "$PROMPT_FILE" --verbatim --model "$(route_model grok-cli)" --effort "$(route_effort grok-cli)" \
         --cwd "$PEER_WORKDIR" --permission-mode dontAsk \
         --deny Read --deny Edit --deny Write --deny Bash --deny Task --deny 'mcp__*' \
         --disable-web-search --no-subagents --max-turns 15 \
@@ -241,6 +283,18 @@ adapter_argv() {
       printf '%s\0' cursor-agent -p --model "$(route_model composer)" --mode ask --trust \
         --sandbox enabled --workspace "$PEER_WORKDIR" --output-format stream-json
       ;;
+    opencode)
+      printf '%s\0' env 'OPENCODE_DISABLE_PROJECT_CONFIG=1' \
+        'OPENCODE_CONFIG_CONTENT={"permission":{"edit":"deny","bash":"deny","webfetch":"deny","task":"deny"}}' \
+        opencode run --dir "$PEER_WORKDIR" --format json \
+        "Follow the attached brief. Return only schema-shaped JSON." --file "$PROMPT_FILE"
+      _oc_model="$(route_model opencode)"
+      [ "$_oc_model" = "auto" ] || [ -z "$_oc_model" ] || printf '%s\0' --model "$_oc_model"
+      _oc_effort="$(route_effort opencode)"
+      case "$_oc_effort" in
+        none|minimal|low|medium|high|xhigh|max|default) printf '%s\0' --variant "$_oc_effort" ;;
+      esac
+      ;;
     *) return 1 ;;
   esac
 }
@@ -248,6 +302,9 @@ adapter_argv() {
 # Accept a host-discovered replacement only for its declared target and model
 # family. An override for another target is ignored rather than leaking across
 # routes; an unbound or cross-family override is invalid for its own route.
+# A codex id may carry the serving provider's own namespace (openai.gpt-...,
+# openai/gpt-...) when the CLI routes through a non-default model_provider; the
+# family segment after the namespace is still checked.
 validate_model_override() {
   local route="$1" override="${CROSS_MODEL_MODEL_OVERRIDE:-}" override_target="${CROSS_MODEL_MODEL_OVERRIDE_TARGET:-}" target
   [ -n "$override" ] || { [ -z "$override_target" ]; return; }
@@ -256,7 +313,27 @@ validate_model_override() {
   [ "$override_target" = "$target" ] || return 0
   [ "$target" != "cursor" ] || return 1
   case "$route:$override" in
-    codex:gpt-*|codex:o[0-9]*|claude:opus|claude:sonnet|claude:haiku|claude:claude-*|grok-cli:grok-*|grok-cursor:cursor-grok-*|composer:composer-*) ;;
+    codex:gpt-*|codex:o[0-9]*|codex:*[./]gpt-*|codex:*[./]o[0-9]*|claude:fable|claude:opus|claude:sonnet|claude:haiku|claude:claude-*|grok-cli:grok-*|grok-cursor:cursor-grok-*|grok-cursor:grok-4.7-*|composer:composer-*|opencode:*/*) ;;
+    *) return 1 ;;
+  esac
+}
+
+# Accept an effort override only where the route exposes an effort flag and the
+# value is one that CLI accepts (claude: low|medium|high|xhigh|max; codex
+# model_reasoning_effort: low|medium|high|xhigh|max|ultra; grok: low|medium|high|xhigh).
+# Checked 2026-09-19 against claude and grok CLI help and codex 0.155.0's model
+# list. Codex levels vary per model, so a listed level can still fail after
+# launch on a model that lacks it.
+# cursor-agent routes imply effort in the model id, so any override there is
+# invalid for the route rather than silently dropped. Empty means "no override".
+validate_effort_override() {
+  local route="$1" effort="${CROSS_MODEL_EFFORT_OVERRIDE:-}"
+  [ -n "$effort" ] || return 0
+  case "$route:$effort" in
+    claude:low|claude:medium|claude:high|claude:xhigh|claude:max) ;;
+    codex:low|codex:medium|codex:high|codex:xhigh|codex:max|codex:ultra) ;;
+    grok-cli:low|grok-cli:medium|grok-cli:high|grok-cli:xhigh) ;;
+    opencode:none|opencode:minimal|opencode:low|opencode:medium|opencode:high|opencode:xhigh|opencode:max|opencode:default) ;;
     *) return 1 ;;
   esac
 }
@@ -269,9 +346,10 @@ if [ "${1:-}" = "--emit-adapter" ]; then
   PROMPT_FILE="<prompt-file>"; SCHEMA_REF="<schema>"
   route="${2:-}"
   validate_model_override "$route" 2>/dev/null || { echo "model override '${CROSS_MODEL_MODEL_OVERRIDE:-}' not compatible with route '$route'" >&2; exit 2; }
+  validate_effort_override "$route" 2>/dev/null || { echo "effort override '${CROSS_MODEL_EFFORT_OVERRIDE:-}' not compatible with route '$route'" >&2; exit 2; }
   # adapter_argv emits NUL-delimited argv (can't be captured in a shell var), so
   # validate the route first, then render for humans with NUL -> space.
-  adapter_argv "$route" >/dev/null 2>&1 || { echo "unknown route '$route' (want codex|claude|grok-cli|grok-cursor|cursor|composer)" >&2; exit 2; }
+  adapter_argv "$route" >/dev/null 2>&1 || { echo "unknown route '$route' (want codex|claude|grok-cli|grok-cursor|cursor|composer|opencode)" >&2; exit 2; }
   adapter_argv "$route" | tr '\0' ' '; echo
   exit 0
 fi
@@ -306,8 +384,8 @@ case "$HOST_PROVIDER" in
   *) skip "host serving family '${HOST_PROVIDER:-<empty>}' invalid (want codex|claude|grok|composer|unknown); skipping cross-model pass" ;;
 esac
 case "$HOST_HARNESS" in
-  codex|claude|grok|cursor|unknown) ;;
-  *) skip "host harness '$HOST_HARNESS' invalid (want codex|claude|grok|cursor|unknown); skipping cross-model pass" ;;
+  codex|claude|grok|cursor|opencode|unknown) ;;
+  *) skip "host harness '$HOST_HARNESS' invalid (want codex|claude|grok|cursor|opencode|unknown); skipping cross-model pass" ;;
 esac
 [ "$HOST_PROVIDER" != "unknown" ] || skip "host serving family unattested; automatic cross-model review skipped"
 
@@ -379,6 +457,18 @@ if [ "$DOC_CHARS" -gt "$MAX_DOC_CHARS" ]; then
   skip "document is ${DOC_CHARS} bytes (limit ${MAX_DOC_CHARS}); skipping cross-model pass rather than truncating"
 fi
 
+# The Codex desktop app (Codex.app, or ChatGPT.app since the July 2026 merger)
+# ships `codex` at Contents/Resources without linking it onto PATH (#1272).
+# Append, never prepend, so a PATH-installed CLI stays authoritative.
+# CROSS_MODEL_CODEX_APP_DIRS (colon-separated) overrides the probed dirs.
+if ! command -v codex >/dev/null 2>&1; then
+  OLDIFS="$IFS"; IFS=':'
+  for d in ${CROSS_MODEL_CODEX_APP_DIRS-"${HOME:-}/Applications/ChatGPT.app/Contents/Resources:/Applications/ChatGPT.app/Contents/Resources:${HOME:-}/Applications/Codex.app/Contents/Resources:/Applications/Codex.app/Contents/Resources"}; do
+    if [ -n "$d" ] && [ -x "$d/codex" ]; then PATH="${PATH:+$PATH:}$d"; export PATH; break; fi
+  done
+  IFS="$OLDIFS"
+fi
+
 provider_available() {
   case "$1" in
     codex)    command -v codex >/dev/null 2>&1 ;;
@@ -386,6 +476,7 @@ provider_available() {
     grok)     command -v grok >/dev/null 2>&1 || { cursor_egress_ok && command -v cursor-agent >/dev/null 2>&1; } ;;
     cursor)   command -v cursor-agent >/dev/null 2>&1 ;;
     composer) command -v cursor-agent >/dev/null 2>&1 ;;
+    opencode) command -v opencode >/dev/null 2>&1 ;;
     *) return 1 ;;
   esac
 }
@@ -402,7 +493,7 @@ OLDIFS="$IFS"; IFS=','
 for p in $CANDIDATES; do
   p="$(printf '%s' "$p" | tr -d '[:space:]')"
   [ -n "$p" ] || continue
-  case "$p" in codex|claude|grok|cursor|composer) ;; *) log "ignoring unknown target '$p' in candidates"; continue ;; esac
+  case "$p" in codex|claude|grok|cursor|composer|opencode) ;; *) log "ignoring unknown target '$p' in candidates"; continue ;; esac
   [ "$HOST_PROVIDER" != "unknown" ] && [ "$(target_serving_family "$p")" = "$HOST_PROVIDER" ] && continue
   case " $SELECTED " in *" $p "*) continue ;; esac   # dedup
   if [ -n "$ALLOW" ] && ! in_csv "$p" "$ALLOW"; then log "provider '$p' not in CROSS_MODEL_PEERS allowlist; skipping"; continue; fi
@@ -413,7 +504,7 @@ IFS="$OLDIFS"
 SELECTED="$(printf '%s' "$SELECTED" | sed 's/^ *//')"
 
 [ "$MAX_PEERS" -ge 1 ] || skip "CROSS_MODEL_MAX_PEERS=0; cross-model pass disabled"
-[ -n "$SELECTED" ] || skip "no different-provider peer reachable (host=$HOST_PROVIDER, candidates='$CANDIDATES'); skipping"
+[ -n "$SELECTED" ] || skip "no different-provider peer reachable (host=$HOST_PROVIDER, candidates='$CANDIDATES'); the pass needs a peer agent CLI on PATH (codex, claude, grok, cursor-agent, or opencode), not an API key alone; skipping"
 log "reachable cross-model candidates for lens $REVIEWER_NAME: $SELECTED (host $HOST_PROVIDER excluded; up to $MAX_PEERS successful peer(s))"
 
 # first_n <max> <space-separated list> -> the first <max> tokens.
@@ -447,6 +538,7 @@ PEERERR="$(mktemp "${TMPDIR:-/tmp}/xmodel-doc-err-XXXXXX")"
 PEER_WORKDIR=""
 RAW_OUT=""
 RUN_SUCCEEDED=false
+PROVIDER_OUTCOME="ok"
 cleanup_temp() {
   rm -f "$PROMPT_FILE" "$PEERLOG" "$PEERERR"
   [ -n "$RAW_OUT" ] && rm -f "$RAW_OUT"
@@ -538,9 +630,7 @@ reap() {
 # TERM/INT: reap the live peer group, then exit cleanly (HUP remains ignored).
 on_term() {
   if [ -n "${_HEARTBEAT_PID:-}" ]; then
-    kill "$_HEARTBEAT_PID" 2>/dev/null || true
-    wait "$_HEARTBEAT_PID" 2>/dev/null || true
-    _HEARTBEAT_PID=""
+    stop_heartbeat
   fi
   if [ -n "${ACTIVE_PEER_PID:-}" ]; then
     log "received TERM/INT; reaping peer process group $ACTIVE_PEER_PID"
@@ -577,17 +667,33 @@ start_heartbeat() {
   # Floor to 1s: a non-numeric or 0 value would make `sleep` return instantly and
   # spin the loop, flooding out.log into the runner's byte cap.
   case "$every" in ''|*[!0-9]*) every=60 ;; esac; [ "$every" -lt 1 ] && every=1
-  ( local t0 n; t0="$(date +%s)"
+  _HEARTBEAT_READY=0
+  trap '_HEARTBEAT_READY=1' USR1
+  # Callers restore set +m after launching the peer, so without this the
+  # heartbeat inherits the worker pgid and kill -- -PID cannot reach the sleep.
+  local prev_m; case "$-" in *m*) prev_m=1;; *) prev_m=0;; esac
+  set -m
+  ( local t0 n sleeper=""
+    trap 'kill "${sleeper:-}" 2>/dev/null || true; exit 0' TERM INT
+    kill -USR1 "$parent_pid"
+    t0="$(date +%s)"
     while kill -0 "$parent_pid" 2>/dev/null; do
-      sleep "$every"
+      sleep "$every" & sleeper=$!
+      wait "$sleeper" 2>/dev/null || exit 0
+      sleeper=""
       kill -0 "$parent_pid" 2>/dev/null || break
       n="$(date +%s)"; log "peer alive ($(( n - t0 ))s elapsed)"
     done ) &
   _HEARTBEAT_PID=$!
+  [ "$prev_m" = 0 ] && set +m
+  while [ "$_HEARTBEAT_READY" != 1 ] && kill -0 "$_HEARTBEAT_PID" 2>/dev/null; do sleep 0.01 || true; done
+  trap - USR1
 }
 stop_heartbeat() {
   if [ -n "$_HEARTBEAT_PID" ]; then
-    kill "$_HEARTBEAT_PID" 2>/dev/null || true
+    # Leader-only TERM is deferred until the inner `wait $sleeper` returns, so
+    # the default 60s interval would block this wait. Signal the process group.
+    kill -- -"$_HEARTBEAT_PID" 2>/dev/null || kill "$_HEARTBEAT_PID" 2>/dev/null || true
     wait "$_HEARTBEAT_PID" 2>/dev/null || true
   fi
   _HEARTBEAT_PID=""
@@ -595,6 +701,7 @@ stop_heartbeat() {
 
 run_codex_cmd() {   # CMD already built for the codex route; streams to PEERLOG, writes -o RAW_OUT
   RUN_SUCCEEDED=false
+  local hard_cap="${1:-$HARD_SECS}"
   local prev; case "$-" in *m*) prev=1;; *) prev=0;; esac
   set -m
   "${CMD[@]}" < "$PROMPT_FILE" > "$PEERLOG" 2>&1 &
@@ -610,8 +717,8 @@ run_codex_cmd() {   # CMD already built for the codex route; streams to PEERLOG,
     if [ $(( now - lastchg )) -ge "$IDLE_SECS" ]; then
       log "codex output idle ${IDLE_SECS}s; reaping peer process group"; reap "$pid"; break
     fi
-    if [ $(( now - start )) -ge "$HARD_SECS" ]; then
-      log "codex exceeded hard cap ${HARD_SECS}s; reaping peer process group"; reap "$pid"; break
+    if [ $(( now - start )) -ge "$hard_cap" ]; then
+      log "codex exceeded hard cap ${hard_cap}s; reaping peer process group"; reap "$pid"; break
     fi
     # 1s slices so a finished peer is noticed promptly (was sleep-5-first, which
     # added up to 5s after every short stub / healthy exit).
@@ -674,15 +781,18 @@ run_timeout_cmd() {
   ACTIVE_PEER_PID=""
 }
 
+resolve_python() {
+  for c in python3 python py; do
+    command -v "$c" >/dev/null 2>&1 && "$c" -c '' >/dev/null 2>&1 && { printf '%s\n' "$c"; return; }
+  done
+}
+
 # Decode each {...} object in raw stdout via raw_decode (string/escape-aware,
 # unlike brace counting) and keep the last one shaped like findings. Envelope
 # routes nest that object inside a JSON *string* field, so string values that
 # could hold one are re-scanned rather than skipped.
 recover_findings_json() {   # <logfile> <outfile>
-  # Probe execution, not just PATH presence — Windows Store's python3 stub
-  # satisfies `command -v` then exits nonzero (see resolve-python convention).
-  local py
-  py="$(for c in python3 python py; do command -v "$c" >/dev/null 2>&1 && "$c" -c '' >/dev/null 2>&1 && { echo "$c"; break; }; done)"
+  local py="${PY_BIN:-}"
   [ -n "$py" ] || return 1
   "$py" - "$1" "$2" <<'PY' 2>/dev/null
 import sys, json
@@ -749,6 +859,145 @@ PY
   [ -s "$2" ]
 }
 
+classify_provider_outcome() {
+  local py="${PY_BIN:-}"
+  [ -n "$py" ] || { printf '%s\n' failed; return; }
+  "$py" - "$PEERLOG" "$PEERERR" "${ACTUAL_ROUTE:-}" <<'PY' 2>/dev/null
+import json, re, sys
+
+decoder = json.JSONDecoder()
+
+def scan(text):
+    objects, plain = [], []
+    cursor = search = 0
+    while True:
+        start = text.find("{", search)
+        if start < 0:
+            break
+        try:
+            value, end = decoder.raw_decode(text, start)
+        except Exception:
+            search = start + 1
+            continue
+        if isinstance(value, dict):
+            plain.extend((text[cursor:start], "\n"))
+            objects.append(value)
+            cursor = end
+        search = max(end, start + 1)
+    plain.append(text[cursor:])
+    return objects, "".join(plain)
+
+texts = []
+object_streams = []
+route = sys.argv[3]
+for path in sys.argv[1:3]:
+    try:
+        text = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        text = ""
+    found, plain = scan(text)
+    texts.append(plain)
+    object_streams.append(found)
+
+def status(value):
+    error = value.get("error")
+    nested = error if isinstance(error, dict) else {}
+    for candidate in (
+        value.get("api_error_status"), value.get("http_status"), value.get("status"),
+        nested.get("api_error_status"), nested.get("http_status"), nested.get("status"),
+    ):
+        if candidate is not None:
+            return candidate
+    return None
+
+same_line = re.compile(r"(?:^|\W)(?:API Error|HTTP(?: Error)?)[^\r\n]*?529(?:\D|$)[^\r\n]*?(?:overload|capacity)", re.I)
+split_head = re.compile(r"(?:^|\W)(?:API Error|HTTP(?: Error)?)[^\r\n]*?529(?:\D|$)", re.I)
+split_tail = re.compile(r"^\s*[^\w]*(?:overload|capacity)", re.I)
+
+def overload_text(text):
+    lines = text.splitlines()
+    return any(same_line.search(line) for line in lines) or any(split_head.search(line) and split_tail.search(lines[index + 1]) for index, line in enumerate(lines[:-1]))
+
+def provider_error_text(value):
+    error = value.get("error")
+    if isinstance(error, dict):
+        message = error.get("message", "")
+    elif isinstance(error, str):
+        message = error
+    elif value.get("type") == "error" or value.get("is_error") is True:
+        message = value.get("message", "")
+    else:
+        message = ""
+    return message if isinstance(message, str) else ""
+
+def route_terminal_success(value):
+    if route == "codex":
+        return {"turn.completed": True, "turn.failed": False}.get(value.get("type"))
+    return None
+
+def terminal_record(value):
+    error = value.get("error")
+    return route_terminal_success(value) is not None or value.get("type") in {"result", "error"} or error not in (None, False, "") or status(value) is not None or any(key in value for key in ("is_error", "terminal_reason", "stopReason", "api_error_status"))
+
+def terminal_success(value):
+    route_success = route_terminal_success(value)
+    if route_success is not None:
+        return route_success
+    subtype = str(value.get("subtype", ""))
+    terminal_reason = str(value.get("terminal_reason", ""))
+    stop_reason = str(value.get("stopReason", ""))
+    if value.get("is_error") is True or value.get("error") not in (None, False, ""):
+        return False
+    terminal_status = status(value)
+    if terminal_status is not None:
+        try:
+            status_ok = 200 <= int(terminal_status) < 300
+        except (TypeError, ValueError):
+            status_ok = str(terminal_status).lower() in {"ok", "success", "completed"}
+        if not status_ok:
+            return False
+    if "stopReason" in value and stop_reason not in {"end_turn", "completed", "success"}:
+        return False
+    if "terminal_reason" in value and terminal_reason not in {"end_turn", "completed", "success"}:
+        return False
+    if "api_error_status" in value:
+        if value.get("api_error_status") is not None or value.get("is_error") is not False:
+            return False
+    if value.get("type") == "result":
+        if subtype:
+            return subtype == "success"
+        return route in {"grok-cursor", "cursor", "composer"}
+    if "stopReason" in value or "terminal_reason" in value or terminal_status is not None or "api_error_status" in value:
+        return True
+    return value.get("is_error") is False
+
+terminal_streams = [[value for value in stream if terminal_record(value)] for stream in object_streams]
+authoritative = next((stream[-1] for stream in terminal_streams if stream), None)
+if authoritative is not None:
+    if terminal_success(authoritative):
+        print("ok")
+    elif str(status(authoritative)) == "529" or overload_text(provider_error_text(authoritative)):
+        print("overloaded")
+    else:
+        print("failed")
+    raise SystemExit
+
+if any(overload_text(plain) for plain in texts):
+    print("overloaded")
+else:
+    print("ok")
+PY
+}
+
+classify_route_output() {
+  PROVIDER_OUTCOME="$(classify_provider_outcome)"
+  case "$PROVIDER_OUTCOME" in
+    ok) ;;
+    overloaded) RUN_SUCCEEDED=false; rm -f "$RAW_OUT" ;;
+    *) log "peer terminal envelope reports failure; discarding structured output"; RUN_SUCCEEDED=false; rm -f "$RAW_OUT" ;;
+  esac
+}
+
 # Parse a schema-shaped object out of a headless CLI JSON envelope (claude/grok/cursor).
 parse_structured() {   # <logfile> <outfile>
   # Buffered single-object envelopes (grok-cli json, test stubs).
@@ -780,36 +1029,59 @@ parse_structured() {   # <logfile> <outfile>
   recover_findings_json "$1" "$2"
 }
 
+parse_opencode_events() {  # <logfile> <outfile>
+  local text tmp
+  text="$(jq -rs '[.[] | select(.type=="text") | (.part.text // empty)] | join("")' "$1" 2>/dev/null)" || text=""
+  [ -n "$text" ] || return 1
+  printf '%s' "$text" | jq -e 'select((.findings|type)=="array")' > "$2" 2>/dev/null && return 0
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ce-opencode-text-XXXXXX")" || return 1
+  printf '%s' "$text" > "$tmp"
+  recover_findings_json "$tmp" "$2"
+  local st=$?
+  rm -f "$tmp"
+  return "$st"
+}
+
 # Run one route for a provider; leaves a schema-shaped (pre-normalization) $RAW_OUT on success.
 attempt_route() {   # <provider> <route>
   local provider="$1" route="$2" note
+  local attempt_hard="${ATTEMPT_HARD_SECS:-}"
+  [ -n "$attempt_hard" ] || attempt_hard="$(route_hard_budget "$route")"
+  PROVIDER_OUTCOME="ok"
   : > "$PEERLOG"; : > "$PEERERR"; rm -f "$RAW_OUT" "$OUT"
   build_cmd "$route"
   case "$route" in
-    codex)                 note="$(route_model "$route") (effort xhigh)" ;;
-    claude|grok-cli)       note="$(route_model "$route") (effort high)" ;;
+    codex|claude|grok-cli) note="$(route_model "$route") (effort $(route_effort "$route"))" ;;
     grok-cursor|composer)  note="$(route_model "$route")" ;;
     cursor)                note="auto (serving model unverified)" ;;
+    opencode)              note="auto (serving model unverified)" ;;
   esac
-  log "peer run: provider=$provider route=$route model=$note lens=$REVIEWER_NAME read-only least-privilege (idle ${IDLE_SECS}s / hard ${HARD_SECS}s; grok-cli hard-only ${UNGUARDED_HARD_SECS}s)"
+  log "peer run: provider=$provider route=$route model=$note lens=$REVIEWER_NAME read-only least-privilege (idle ${IDLE_SECS}s / attempt hard ${attempt_hard}s); full document content egresses to this provider via this route"
   case "$route" in
     codex)
-      run_codex_cmd
+      run_codex_cmd "$attempt_hard"
+      classify_route_output
       if [ "$RUN_SUCCEEDED" = true ] && out_missing_or_invalid; then
         recover_findings_json "$PEERLOG" "$RAW_OUT" && log "recovered codex JSON from stdout (-o file unavailable)"
       fi
       ;;
-    grok-cli)    run_timeout_cmd "" "$UNGUARDED_HARD_SECS" no-idle
+    grok-cli)    run_timeout_cmd "" "$attempt_hard" no-idle
+                 classify_route_output
                  [ "$RUN_SUCCEEDED" = true ] && parse_structured "$PEERLOG" "$RAW_OUT" ;;   # grok reads --prompt-file
-    claude)      run_timeout_cmd "$PROMPT_FILE" "$HARD_SECS" idle
+    claude)      run_timeout_cmd "$PROMPT_FILE" "$attempt_hard" idle
+                 classify_route_output
                  [ "$RUN_SUCCEEDED" = true ] && parse_structured "$PEERLOG" "$RAW_OUT" ;;   # claude -p reads stdin
     grok-cursor|cursor|composer)
       # cursor-agent reads the prompt from stdin (verified). Use stdin, NOT a
       # positional argv token: the composed prompt (persona + schema + template +
       # full document, up to CROSS_MODEL_MAX_DOC_CHARS) can exceed ARG_MAX and fail
       # the exec with E2BIG on low-limit hosts, whereas stdin has no size limit.
-      run_timeout_cmd "$PROMPT_FILE" "$HARD_SECS" idle
+      run_timeout_cmd "$PROMPT_FILE" "$attempt_hard" idle
+      classify_route_output
       [ "$RUN_SUCCEEDED" = true ] && parse_structured "$PEERLOG" "$RAW_OUT" ;;
+    opencode)    run_timeout_cmd "" "$attempt_hard" idle
+                 classify_route_output
+                 [ "$RUN_SUCCEEDED" = true ] && parse_opencode_events "$PEERLOG" "$RAW_OUT" ;;
   esac
   if [ "$RUN_SUCCEEDED" != true ]; then
     rm -f "$RAW_OUT"
@@ -820,9 +1092,21 @@ attempt_route() {   # <provider> <route>
   extract_model_receipt "$route"
 }
 
+# An exact 529 is a transient provider-capacity response, unlike account/session
+# quota 429s. Match structured envelopes first and retain a narrow plain-text
+# fallback for CLIs that print "529 Overloaded" without JSON.
+provider_overloaded() {
+  [ "$PROVIDER_OUTCOME" = "overloaded" ]
+}
+
+route_hard_budget() {
+  if [ "$1" = "grok-cli" ]; then printf '%s\n' "$UNGUARDED_HARD_SECS"; else printf '%s\n' "$HARD_SECS"; fi
+}
+
 # Run one host-resolved provider through its fixed route.
 run_provider() {   # <provider>
   local provider="$1" primary="" fixed="${CROSS_MODEL_FIXED_ROUTE:-}"
+  local provider_budget provider_deadline remaining
   OUT="$RUN_DIR/$REVIEWER_NAME-$provider.json"
   # Per-peer empty workspace, kept SEPARATE from the shared fold-in dir (RUN_DIR).
   # The peer's cwd/workspace and its RAW_OUT live here, so a read-capable peer
@@ -841,13 +1125,37 @@ run_provider() {   # <provider>
     return 0
   fi
   primary="$fixed"
+  PY_BIN="$(resolve_python)"
+  [ -n "$PY_BIN" ] || { log "working Python 3 interpreter required for peer outcome classification; skipping"; rm -f "$OUT"; return 0; }
   validate_model_override "$primary" || { log "model override '${CROSS_MODEL_MODEL_OVERRIDE:-}' not compatible with route '$primary'; skipping"; rm -f "$OUT"; return 0; }
+  validate_effort_override "$primary" || { log "effort override '${CROSS_MODEL_EFFORT_OVERRIDE:-}' not compatible with route '$primary'; skipping"; rm -f "$OUT"; return 0; }
   # Track the route that actually produced the fold-in, so the artifact records
   # whether a grok return went out directly (grok-cli -> xAI) or through Cursor
   # (grok-cursor -> Cursor also received the full document). The <lens>-<provider>
   # filename alone cannot encode that intermediary.
   ACTUAL_ROUTE="$primary"
+  provider_budget="$(route_hard_budget "$primary")"
+  case "$provider_budget" in
+    ''|0*|*[!0-9]*) log "peer hard budget must be a positive integer; skipping"; rm -f "$OUT"; return 0 ;;
+  esac
+  provider_deadline=$(( $(date +%s) + provider_budget ))
+  ATTEMPT_HARD_SECS="$provider_budget"
   attempt_route "$provider" "$primary"
+  if [ ! -s "$RAW_OUT" ] && provider_overloaded; then
+    remaining=$(( provider_deadline - $(date +%s) ))
+    if [ "$remaining" -le "$TRANSIENT_RETRY_DELAY_SECS" ]; then
+      log "provider overload 529; shared peer budget spent, not retrying"
+    else
+      log "provider overload 529; retrying same route once after ${TRANSIENT_RETRY_DELAY_SECS}s"
+      sleep "$TRANSIENT_RETRY_DELAY_SECS"
+      remaining=$(( provider_deadline - $(date +%s) ))
+      if [ "$remaining" -gt 0 ]; then
+        ATTEMPT_HARD_SECS="$remaining"
+        attempt_route "$provider" "$primary"
+      fi
+    fi
+  fi
+  ATTEMPT_HARD_SECS=""
 
   # --- normalize + validate against the synthesis reviewer-return contract ---
   # Force reviewer = <reviewer-name>-<provider>; backfill soft arrays; drop the
@@ -876,6 +1184,7 @@ run_provider() {   # <provider>
          --arg target "$provider" --arg harness "$(route_harness "$ACTUAL_ROUTE")" \
          --arg family "$_target_family" --argjson independent "$_independent" \
          --arg mreq "$(route_model "$ACTUAL_ROUTE")" --arg mact "$MODEL_ACTUAL" \
+         --arg ereq "$(route_effort "$ACTUAL_ROUTE")" \
          'if (.findings|type)=="array"
           then { reviewer: $r,
                  cross_model_route: $route,
@@ -885,6 +1194,7 @@ run_provider() {   # <provider>
                  independence_verified: $independent,
                  model_requested: $mreq,
                  model_actual: $mact,
+                 effort_requested: $ereq,
                  findings: [ .findings[] | if (.autofix_class? == "safe_auto") then .autofix_class = "gated_auto" else . end ],
                  residual_risks: (.residual_risks // []),
                  deferred_questions: (.deferred_questions // []) }

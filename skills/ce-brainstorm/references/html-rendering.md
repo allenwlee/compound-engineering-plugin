@@ -10,11 +10,10 @@ content rendered by different skills shares the same HTML principles.
 
 The HTML artifact is the *only* artifact the skill produces for that run —
 output mode is exclusive (markdown OR HTML, never both). Downstream
-consumers that read HTML today (`ce-work`, human readers) do so directly;
-the agent-consumability rules below make that work. `ce-doc-review` is
-*not* currently an HTML consumer — its mutation mechanics are markdown-only,
-so the ce-plan handoff gates the 5.3.8 doc-review pass to `OUTPUT_FORMAT=md`
-runs and skips it for HTML.
+consumers that read HTML today (`ce-doc-review`, `ce-work`, human readers) do
+so directly; the agent-consumability rules below make that work. `ce-doc-review`
+also applies fixes in the artifact's native format while preserving its
+existing structure.
 
 ## Hard invariants
 
@@ -62,8 +61,8 @@ These hold regardless of which skill produced the artifact.
   `verification-contract`, `definition-of-done`, and `appendix` when those
   sections exist. Requirements-only artifacts omit links to absent
   implementation sections.
-- **Visible readiness metadata.** If the artifact has `artifact_contract`,
-  `artifact_readiness`, `product_contract_source`, or `execution`, render
+- **Visible artifact metadata.** If the artifact has `artifact_contract`,
+  `product_contract_source`, or `execution`, render
   those values in the visible header metadata. Do not hide a duplicate copy in
   JSON, `data-*`, or `<meta>` tags.
 
@@ -346,13 +345,13 @@ contracts — the agent picks shapes that fit the content.
   labels and values for Goal, Files, Dependencies), and secondary
   content (Approach, Test Scenarios, Verification, Patterns to Follow)
   inside `<details>` collapsibles, **default-closed**. At 3+ units the
-  default-closed rule is load-bearing — rendering all units fully
+  default-closed rule must hold — rendering all units fully
   expanded turns the doc into one continuous scroll where the reader
   can't see the unit list at a glance. The metadata strip is the
   primary always-visible surface; subsection labels (`<summary>`) are
   clickable affordances for readers to expand on demand. A single unit
   with no secondary content can skip `<details>` entirely; the rule
-  fires when content exists to hide. The `<dl>` strip is for *descriptive*
+  applies when there is content to hide. The `<dl>` strip is for *descriptive*
   fields (Goal, Files, Dependencies). A *directive* field — `Execution
   note` is the canonical case, carrying a procedural instruction the
   implementer must act on (e.g. "start with a failing integration test") —
@@ -400,7 +399,7 @@ exclusion suppress a conceptual diagram the content warrants.
 
 **Diagrams complement prose; they never replace it.** A diagram is an
 accelerant placed next to the prose it illustrates, not a substitute. The
-IDed prose stays complete and standalone — a reader who ignores every
+ID-bearing prose stays complete and standalone — a reader who ignores every
 diagram still gets the full content in text, and a text-reading downstream
 agent (which does not parse SVG geometry) is never left with a relationship
 that exists only in the picture. This extends the prose-is-authoritative
@@ -552,11 +551,10 @@ fine when the content suggests them.
 
 ## Agent-consumability rules
 
-Downstream agents that read HTML today (`ce-work`, a skill re-reading its
-own prior artifact on a resume run, future consumers) reason over the HTML
-as text — the way they reason over markdown, not via DOM extraction or a
-script-style parse. `ce-doc-review` is not a current HTML consumer (see
-opening note).
+Downstream agents that read HTML today (`ce-doc-review`, `ce-work`, a skill
+re-reading its own prior artifact on a resume run, future consumers) reason
+over the HTML as text — the way they reason over markdown, not via DOM
+extraction or a script-style parse.
 
 These rules are why such a consumer can locate one item (a single
 requirement, unit, idea, or other ID-bearing entry) and reason over it from
@@ -585,8 +583,8 @@ looks identical. Compose so semantic understanding is reachable in source:
   even if the narrative version reads better. Section heading
   vocabulary is the contract downstream consumers grep for. (Editorial
   re-titles can appear as eyebrow labels, sub-headings, or visual
-  framing — but the load-bearing section heading matches the contract
-  name.)
+  framing — but the section heading itself, the one downstream agents
+  grep for, matches the contract name.)
 - **All semantic content lives in actual HTML text.** No CSS `::before
   { content: "..." }` carrying meaning, no background images as
   content, no semantic info that only renders. Whatever the agent sees
@@ -628,7 +626,7 @@ Before returning the artifact, scan it for common slips:
 - **Diagram labels** are legible — no arrow paths crossing text,
   halo width appropriate for font size.
 - **Diagrams complement prose, not replace it.** Every relationship a
-  diagram conveys is also present in the surrounding IDed prose; no
+  diagram conveys is also present in the surrounding ID-bearing prose; no
   content lives only in an SVG.
 - **No JS framework runtimes** included. Small inline `<script>` for
   active-section TOC tracking or anchor-permalink behavior is the only

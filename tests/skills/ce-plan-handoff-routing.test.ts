@@ -24,32 +24,40 @@ const DOC_REVIEW_BODY = readFileSync(
   "utf8",
 )
 
+const DOC_REVIEW_MODES = readFileSync(
+  path.join(process.cwd(), "skills/ce-doc-review/references/modes.md"),
+  "utf8",
+)
+
+const DOC_REVIEW_INTAKE = readFileSync(
+  path.join(process.cwd(), "skills/ce-doc-review/references/document-intake.md"),
+  "utf8",
+)
+
 const ISSUE_CREATION_START = HANDOFF_BODY.indexOf("## Issue Creation")
 const ISSUE_CREATION_SECTION =
   ISSUE_CREATION_START > -1 ? HANDOFF_BODY.slice(ISSUE_CREATION_START) : ""
 
 // Regression guard for https://github.com/EveryInc/compound-engineering-plugin/issues/714.
 //
-// ce-plan Phase 5.4 presents a 4-option post-generation menu. Because SKILL.md
-// content caches at session start while reference files load on demand, the
-// per-option routing (what action fires when the user picks an option) MUST
-// live in SKILL.md itself — not solely in references/plan-handoff.md. The
-// reference may still hold elaborate sub-flows (Issue Creation tracker
-// detection); only the bare per-option action must be inline.
+// ce-plan's kernel now requires plan-handoff.md immediately before Phase 5.4
+// and reloads it before acting on a later-turn selection. The reference owns
+// the menu and every route; the body owns the fail-closed load and completion
+// predicate that prevent the original issue #714 stop-in-prose regression.
 //
 // Symptom when this regresses: the agent renders the menu, the user picks
 // "Start `ce-work` (Recommended)", and the agent stops in prose without
 // invoking the `ce-work` skill.
 describe("ce-plan post-generation menu routing", () => {
-  test("SKILL.md contains inline routing for all four menu options", () => {
+  test("plan-handoff.md owns executable routing for every menu option", () => {
     // Anchor on the Phase 5.4 region so a stray match elsewhere in the file
     // doesn't satisfy these assertions.
-    const phaseStart = SKILL_BODY.indexOf("##### 5.3.8")
+    const phaseStart = HANDOFF_BODY.indexOf("## 5.4 Post-Generation Options")
     expect(
       phaseStart,
-      "ce-plan SKILL.md no longer contains the '##### 5.3.8' phase heading — the test anchor needs updating, or Phase 5.4 was removed.",
+      "plan-handoff.md no longer contains the Phase 5.4 owner anchor.",
     ).toBeGreaterThan(-1)
-    const phaseRegion = SKILL_BODY.slice(phaseStart)
+    const phaseRegion = HANDOFF_BODY.slice(phaseStart)
 
     // Each menu option must have a routing bullet in the phase region that
     // pairs the label with an action statement. The routing bullet shape is
@@ -65,11 +73,7 @@ describe("ce-plan post-generation menu routing", () => {
       { name: "Start `ce-work`", fragment: "Start `ce-work`" },
       { name: "Run it as a /goal", fragment: "Run it as a `/goal`" },
       { name: "Create Issue", fragment: "Create Issue" },
-      { name: "Publish to Proof", fragment: "Publish to Proof" },
-      // "Open in browser" is the HTML-mode replacement for Publish to Proof.
-      // Both routings must be present inline: the menu shows one or the other
-      // depending on OUTPUT_FORMAT, so the agent needs both bullets to route
-      // correctly without loading the reference.
+      { name: "Prototype a remaining feel-question", fragment: "Prototype a remaining feel-question" },
       { name: "Open in browser", fragment: "Open in browser" },
     ]
 
@@ -88,14 +92,14 @@ describe("ce-plan post-generation menu routing", () => {
       const found = inlineRoutingPattern.test(phaseRegion)
       expect(
         found,
-        `ce-plan SKILL.md Phase 5.4 is missing inline routing for menu option "${name}". The bare per-option action MUST live in SKILL.md (not solely in references/plan-handoff.md) so an agent that doesn't load the reference still routes correctly. See https://github.com/EveryInc/compound-engineering-plugin/issues/714 and docs/solutions/skill-design/post-menu-routing-belongs-inline-2026-04-28.md.`,
+        `plan-handoff.md is missing executable routing for menu option "${name}".`,
       ).toBe(true)
     }
   })
 
   test("Start `ce-work` routing names the host skill mechanism and plan path", () => {
-    const phaseStart = SKILL_BODY.indexOf("##### 5.3.8")
-    const phaseRegion = SKILL_BODY.slice(phaseStart)
+    const phaseStart = HANDOFF_BODY.indexOf("## 5.4 Post-Generation Options")
+    const phaseRegion = HANDOFF_BODY.slice(phaseStart)
 
     // The Start `ce-work` routing BULLET (not the menu list entry) must name
     // both (a) the host's skill-invocation mechanism and (b) the plan path
@@ -111,24 +115,22 @@ describe("ce-plan post-generation menu routing", () => {
     )
     expect(
       ceWorkRoutingMatch,
-      "`ce-plan` SKILL.md Phase 5.4 is missing the inline '- **Start `ce-work`** ...' routing bullet (distinct from the numbered menu list entry).",
+      "plan-handoff.md is missing the '- **Start `ce-work`** ...' routing bullet.",
     ).not.toBeNull()
     const block = ceWorkRoutingMatch![0]
 
     expect(
       /skill[\s-]?invocation|Skill tool|skill primitive/i.test(block),
-      "`ce-plan` SKILL.md 'Start `ce-work`' routing must name the host's skill-invocation mechanism so the agent fires the invocation rather than announcing a handoff in prose. See issue #714.",
+      "plan-handoff.md 'Start `ce-work`' routing must name the host's skill-invocation mechanism.",
     ).toBe(true)
 
     expect(
       /plan path|plan file path|plan as the (?:skill )?argument|passing the plan/i.test(block),
-      "`ce-plan` SKILL.md 'Start `ce-work`' routing must name the plan path as the argument so the agent passes it correctly to `ce-work`. See issue #714.",
+      "plan-handoff.md 'Start `ce-work`' routing must name the plan path as the argument.",
     ).toBe(true)
   })
 
-  test("plan-handoff.md routing for Start `ce-work` matches the inline host-generic phrasing", () => {
-    // Both surfaces must converge so that an agent which loads the reference
-    // sees compatible, host-generic guidance.
+  test("plan-handoff.md Start `ce-work` route is host-generic", () => {
     const ceWorkLine = HANDOFF_BODY.match(
       /\*\*Start `ce-work`\*\*[^\n]*->[^\n]+/,
     )
@@ -139,7 +141,7 @@ describe("ce-plan post-generation menu routing", () => {
 
     expect(
       /skill[\s-]?invocation|Skill tool|skill primitive/i.test(ceWorkLine![0]),
-      `references/plan-handoff.md 'Start \`ce-work\`' routing must use host-generic invocation language matching SKILL.md. The bare user-command handoff was the regression. Found: ${JSON.stringify(ceWorkLine![0])}`,
+      `references/plan-handoff.md 'Start \`ce-work\`' routing must use host-generic invocation language. Found: ${JSON.stringify(ceWorkLine![0])}`,
     ).toBe(true)
   })
 
@@ -167,31 +169,17 @@ describe("ce-plan post-generation menu routing", () => {
   })
 
   test("cross-skill routes use one generic invocation contract across skill-capable hosts", () => {
-    for (const [label, body] of [
-      ["SKILL.md", SKILL_BODY],
-      ["plan-handoff.md", HANDOFF_BODY],
-    ] as const) {
-      expect(
-        /host(?:'s)? normal skill-invocation mechanism/i.test(body),
-        `${label} must define cross-skill invocation by host capability, not a hardcoded tool name.`,
-      ).toBe(true)
-      expect(
-        /do not substitute[^.]{0,120}(?:Task|Agent|subagent)/i.test(body),
-        `${label} must distinguish skill invocation from generic delegation.`,
-      ).toBe(true)
-      expect(
-        body.includes("`Skill` in Claude Code and Codex"),
-        `${label} must not claim that Claude Code and Codex share a literal Skill tool.`,
-      ).toBe(false)
-    }
+    expect(/host(?:'s)? normal skill-invocation mechanism/i.test(HANDOFF_BODY)).toBe(true)
+    expect(/do not substitute[^.]{0,120}(?:Task|Agent|subagent)/i.test(HANDOFF_BODY)).toBe(true)
+    expect(HANDOFF_BODY.includes("`Skill` in Claude Code and Codex")).toBe(false)
 
-    for (const route of ["Start `ce-work`", "Decide on the review's open items", "Publish to Proof"]) {
+    for (const route of ["Start `ce-work`", "Decide on the review's open items", "Prototype a remaining feel-question"]) {
       const escaped = route.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-      const bullet = SKILL_BODY.match(new RegExp(`^- \\*\\*${escaped}[^\\n]+`, "m"))?.[0]
-      expect(bullet, `ce-plan SKILL.md is missing the inline ${route} routing bullet.`).toBeDefined()
+      const bullet = HANDOFF_BODY.match(new RegExp(`^- \\*\\*${escaped}[^\\n]+`, "m"))?.[0]
+      expect(bullet, `plan-handoff.md is missing the ${route} routing bullet.`).toBeDefined()
       expect(
         /normal skill-invocation mechanism|cross-skill invocation rule/i.test(bullet!),
-        `ce-plan SKILL.md ${route} routing must apply the generic cross-skill invocation contract inline.`,
+        `plan-handoff.md ${route} routing must apply the generic cross-skill invocation contract.`,
       ).toBe(true)
     }
   })
@@ -206,33 +194,39 @@ describe("ce-plan post-generation menu routing", () => {
       "approach-altitude's ce-work handoff must use the same host-generic skill invocation contract.",
     ).toBe(true)
     expect(
-      /skill_unreachable/.test(SKILL_BODY),
-      "ce-plan's final completion contract must admit the documented skill_unreachable state.",
+      /skill_unreachable/.test(HANDOFF_BODY),
+      "ce-plan's handoff owner must admit the documented skill_unreachable state.",
     ).toBe(true)
   })
 
   test("caller and callee responsibilities stay explicit in failure paths", () => {
+    // The argument contract and the missing-path failure text moved into the
+    // references the body mandates (modes.md at mode detection, document-intake.md
+    // at Phase 1); the no-self-invocation and no-caller-routing rules are checked
+    // across the whole always-loaded body plus those two files.
+    const DOC_REVIEW_CONTRACT = DOC_REVIEW_MODES + DOC_REVIEW_INTAKE
     expect(
-      /\*\*Non-interactive argument contract:\*\*/.test(DOC_REVIEW_BODY),
+      /\*\*Non-interactive argument contract:\*\*/.test(DOC_REVIEW_CONTRACT),
       "ce-doc-review must present mode:non-interactive as its input contract, not as an instruction to invoke itself.",
     ).toBe(true)
     expect(
-      DOC_REVIEW_BODY.includes(
+      DOC_REVIEW_CONTRACT.includes(
         "Review failed: non-interactive mode requires a document path. Expected arguments: mode:non-interactive <path>",
       ),
       "ce-doc-review's missing-path error must report the expected arguments without telling the skill to re-invoke itself.",
     ).toBe(true)
+    const DOC_REVIEW_ALL = DOC_REVIEW_BODY + DOC_REVIEW_CONTRACT
     expect(
-      DOC_REVIEW_BODY.includes("Re-invoke the ce-doc-review skill"),
+      DOC_REVIEW_ALL.includes("Re-invoke the ce-doc-review skill"),
       "ce-doc-review must not describe its own argument-validation failure as self-invocation.",
     ).toBe(false)
     expect(
-      /re-invoke/i.test(DOC_REVIEW_BODY),
+      /re-invoke/i.test(DOC_REVIEW_ALL),
       "ce-doc-review validation errors must state the required correction and stop, not ambiguously tell the running workflow to re-invoke.",
     ).toBe(false)
     expect(
       /calling workflow|host(?:'s)? normal skill-invocation mechanism|`ce-doc-review` may/i.test(
-        DOC_REVIEW_BODY,
+        DOC_REVIEW_ALL,
       ),
       "ce-doc-review must own only its argument and execution contracts; caller-side routing belongs in ce-plan.",
     ).toBe(false)
@@ -244,9 +238,11 @@ describe("ce-plan post-generation menu routing", () => {
     const pipelineStart = HANDOFF_BODY.indexOf("**Pipeline mode:**")
     const pipelineEnd = HANDOFF_BODY.indexOf("## 5.3.9 Final Checks and Cleanup")
     const reviewPipeline = HANDOFF_BODY.slice(pipelineStart, pipelineEnd)
+    // Pins the condition (ce-plan is the party that recorded the stand-in
+    // result), not the noun the prose uses for that result.
     expect(
-      /ce-plan recorded the `skill_unreachable` envelope/i.test(reviewPipeline),
-      "ce-plan must own the synthetic pre-entry envelope instead of attributing it to an invocation that never began.",
+      /ce-plan recorded the `skill_unreachable`/i.test(reviewPipeline),
+      "ce-plan must own the synthetic pre-entry result instead of attributing it to an invocation that never began.",
     ).toBe(true)
     expect(
       reviewPipeline.includes("invocation instead produced `skill_unreachable`"),
@@ -265,10 +261,7 @@ describe("ce-plan post-generation menu routing", () => {
       menuPipeline!.includes("ce-doc-review has already run"),
       "the pipeline handoff must not claim the review ran after a skill_unreachable pre-entry state.",
     ).toBe(false)
-    expect(
-      /`ce-plan` has recorded the documented `skill_unreachable` envelope/.test(SKILL_BODY),
-      "ce-plan's completion guard must attribute its synthetic pre-entry envelope to ce-plan, not to ce-doc-review.",
-    ).toBe(true)
+    expect(/`?ce-plan`? (?:has )?recorded the (?:documented )?`skill_unreachable`/.test(HANDOFF_BODY)).toBe(true)
     expect(
       /ce-doc-review` has run in (?:headless|non-interactive) mode or returned the documented `skill_unreachable` envelope/.test(
         SKILL_BODY,
@@ -278,10 +271,7 @@ describe("ce-plan post-generation menu routing", () => {
   })
 
   test("Codex goal handoff is capability-based and menu-cap aware", () => {
-    for (const [label, body] of [
-      ["SKILL.md", SKILL_BODY],
-      ["plan-handoff.md", HANDOFF_BODY],
-    ] as const) {
+    for (const [label, body] of [["plan-handoff.md", HANDOFF_BODY]] as const) {
       expect(
         body.includes("top-level `/goal` command"),
         `${label} must not gate Codex goal handoff on a literal top-level /goal command; Codex exposes goal mode through create_goal.`,
@@ -306,7 +296,7 @@ describe("ce-plan post-generation menu routing", () => {
     }
   })
 
-  test("completion contract is visible before the workflow and guarded at the end", () => {
+  test("completion contract is visible before the workflow and handoff action stays owner-guarded", () => {
     const contractStart = SKILL_BODY.indexOf("## Mandatory Completion Contract")
     const interactionStart = SKILL_BODY.indexOf("## Interaction Method")
     expect(
@@ -323,68 +313,16 @@ describe("ce-plan post-generation menu routing", () => {
     ).toBeLessThan(interactionStart)
 
     const topContract = SKILL_BODY.slice(contractStart, interactionStart)
-    expect(
-      /Every normal interactive `ce-plan` branch that produces a plan artifact or checkpoint is incomplete until its owning handoff question is presented/i.test(topContract),
-      "Top completion contract must state that artifact/checkpoint branches are incomplete until their owning handoff question is presented.",
-    ).toBe(true)
-    expect(
-      /software implementation-plan runs[\s\S]{0,120}Phase 5\.4[\s\S]{0,120}handoff menu/i.test(topContract),
-      "Top completion contract must state that software implementation-plan runs are incomplete until the Phase 5.4 handoff menu is presented.",
-    ).toBe(true)
-    expect(
-      /Non-software plan-seeking and approach-altitude branches[\s\S]{0,160}do not force those branches through Phase 5\.4/i.test(topContract),
-      "Top completion contract must preserve branch-owned handoffs for non-software plan-seeking and approach-altitude branches.",
-    ).toBe(true)
-    expect(
-      /Answer-seeking is the exception:[\s\S]{0,140}may end after delivering the answer unless[\s\S]{0,100}offer save\/share/i.test(topContract),
-      "Top completion contract must allow answer-seeking to end after the answer unless universal-planning says to offer save/share.",
-    ).toBe(true)
-    expect(
-      /intermediate milestones, not completion/i.test(topContract),
-      "Top completion contract must say writing/reviewing the plan are intermediate milestones, not completion.",
-    ).toBe(true)
-    expect(
-      /only ["“]create a plan["”][\s\S]{0,160}run [`']?ce-doc-review[`']?/i.test(topContract),
-      "Top completion contract must make 'user only asked to create a plan / run ce-doc-review' non-exempt.",
-    ).toBe(true)
-    expect(
-      /Plan ready at `<absolute path to plan>`\. What would you like to do next\?/i.test(topContract),
-      "Top completion contract must include the literal Phase 5.4 handoff question.",
-    ).toBe(true)
-    expect(
-      /non-interactive review state or documented skip state is summarized/i.test(topContract),
-      "Top completion contract must allow documented skip-state summaries, not only non-interactive review summaries.",
-    ).toBe(true)
-
-    const checklistStart = SKILL_BODY.indexOf("**Final pre-response checklist:**")
-    const completionStart = SKILL_BODY.indexOf("**Completion check:**")
-    expect(
-      checklistStart,
-      "ce-plan SKILL.md must include a final pre-response checklist before the completion check.",
-    ).toBeGreaterThan(-1)
-    expect(
-      completionStart,
-      "ce-plan SKILL.md must keep the existing Completion check anchor.",
-    ).toBeGreaterThan(-1)
-    expect(
-      checklistStart,
-      "Final pre-response checklist should appear immediately before the terminal completion check.",
-    ).toBeLessThan(completionStart)
-
-    const finalGuard = SKILL_BODY.slice(checklistStart, SKILL_BODY.indexOf("**Pipeline mode exception:**"))
-    for (const expected of [
-      "Plan file exists on disk",
-      "Non-interactive review state or documented skip state was summarized above the menu",
-      "Phase 5.4 menu was presented for software implementation-plan runs, even if the user only asked to create the plan or run doc review, unless pipeline mode returned control to the caller",
-      "If the user selected an action, the selected routing was executed",
-      'Incorrect final response: "Created the plan and ran doc review."',
-      'Correct terminal handoff: "Created the plan and ran doc review. Plan ready at `<absolute path to plan>`. What would you like to do next?"',
-    ]) {
-      expect(
-        finalGuard.includes(expected),
-        `Final completion guard is missing expected text: ${expected}`,
-      ).toBe(true)
-    }
+    // Wording restated in plain language (2026-09); the pin guards the condition, not the old phrasing.
+    expect(/Every normal interactive branch[\s\S]{0,160}incomplete until the user has been asked what to do next/i.test(topContract)).toBe(true)
+    expect(/software implementation-plan run[\s\S]{0,160}Phase 5\.4 menu[\s\S]{0,100}selected action has actually fired/i.test(topContract)).toBe(true)
+    expect(/Non-software plans and approach-level plans end with the handoff their reference workflow defines/i.test(topContract)).toBe(true)
+    expect(/only answers a question may end after the answer unless its reference requires a save or share step/i.test(topContract)).toBe(true)
+    expect(/intermediate milestones/i.test(topContract)).toBe(true)
+    expect(SKILL_BODY).toMatch(/Read `references\/plan-handoff\.md` immediately before Phase 5\.3\.8 and 5\.4/i)
+    expect(SKILL_BODY).toMatch(/reload `references\/plan-handoff\.md` before acting/i)
+    expect(SKILL_BODY).toMatch(/Rendering the menu[\s\S]{0,160}is not completion; execute the selected action/i)
+    expect(HANDOFF_BODY).toContain('**Question:** "Plan ready at `<absolute path to plan>`. What would you like to do next?"')
   })
 
   test("inline-routing regex rejects empty-action bullets even when followed by another bullet", () => {
@@ -502,24 +440,77 @@ describe("ce-plan post-generation menu routing", () => {
       ).toBe(false)
     })
 
-    // Codex review of PR #971 (P3): the inline SKILL.md routing caches at session
-    // start while the reference loads on demand, so the capability-based Linear
-    // guidance must also live inline — not only in plan-handoff.md.
-    test("inline SKILL.md Create Issue routing is capability-based for Linear", () => {
-      const phaseStart = SKILL_BODY.indexOf("##### 5.3.8")
-      const phaseRegion = SKILL_BODY.slice(phaseStart)
+    test("plan-handoff Create Issue routing is capability-based for Linear", () => {
+      const phaseStart = HANDOFF_BODY.indexOf("## 5.4 Post-Generation Options")
+      const phaseRegion = HANDOFF_BODY.slice(phaseStart)
       const createIssueRouting = phaseRegion.match(
         /^- \*\*Create Issue\*\*[^\n]+/m,
       )
       expect(
         createIssueRouting,
-        "ce-plan SKILL.md is missing the inline '- **Create Issue** ...' routing bullet.",
+        "plan-handoff.md is missing the '- **Create Issue** ...' routing bullet.",
       ).not.toBeNull()
       const bullet = createIssueRouting![0]
       expect(
         /connector|MCP|API|GraphQL/i.test(bullet) && /no guaranteed `linear` CLI|not.*proof|do not treat/i.test(bullet),
-        "ce-plan SKILL.md inline Create Issue routing must carry the capability-based Linear guidance (named access surfaces + 'missing binary is not proof unavailable'), since inline routing is what an agent sees when the reference isn't loaded.",
+        "plan-handoff.md Create Issue routing must carry the capability-based Linear guidance.",
       ).toBe(true)
     })
+  })
+})
+
+// 2026-08-22: the Output Contract gate lets ce-plan finish in chat for small,
+// well-specified work. These pins hold the seam that lets Direct and Chat brief
+// skip the Phase 5.4 menu without thinning the Durable floor.
+describe("ce-plan output-contract gate", () => {
+  const OUTPUT_CONTRACTS_BODY = readFileSync(
+    path.join(process.cwd(), "skills/ce-plan/references/output-contracts.md"),
+    "utf8",
+  )
+  const INTAKE_BODY = readFileSync(path.join(process.cwd(), "skills/ce-plan/references/intake.md"), "utf8")
+  const RESEARCH_BODY = readFileSync(path.join(process.cwd(), "skills/ce-plan/references/research.md"), "utf8")
+
+  test("kernel states the gate once, names its three tiers, and points at the chat-tier owner", () => {
+    const gate = SKILL_BODY.slice(SKILL_BODY.indexOf("## Output Contract"), SKILL_BODY.indexOf("## Workflow"))
+    expect(gate).toMatch(/Phase 0\.6/)
+    for (const tier of ["**Direct**", "**Chat brief**", "**Durable**"]) expect(gate).toContain(tier)
+    expect(gate).toContain("references/output-contracts.md")
+    expect(gate).toMatch(/take the heavier one/)
+    expect(gate).toMatch(/Durable regardless of size: a run with no synchronous user/)
+    expect(gate).toMatch(/a request whose wording asks for a plan, a plan file, or an output format/)
+  })
+
+  test("chat-tier results carry their own done condition beside the Phase 5.4 menu", () => {
+    const contract = SKILL_BODY.slice(SKILL_BODY.indexOf("## Mandatory Completion Contract"), SKILL_BODY.indexOf("## Interaction Method"))
+    expect(contract).toMatch(/complete when its output contract's done condition is met/)
+    expect(contract).toMatch(/For Direct, the change stated/)
+    expect(contract).toMatch(/for a Chat brief, the brief and its one-line save-or-`ce-work` offer/)
+    expect(contract).toMatch(/Neither presents the Phase 5\.4 menu/)
+  })
+
+  test("intake resolves the gate before the scoping synthesis and does not restate it", () => {
+    expect(INTAKE_BODY).toMatch(/First resolve the Output Contract gate that SKILL\.md states/)
+    expect(INTAKE_BODY).toMatch(/Output Contract gate selected Durable/)
+    expect(INTAKE_BODY).not.toMatch(/\*\*Direct\*\* —/)
+  })
+
+  test("a saved Chat brief never claims the unified-plan contract", () => {
+    expect(OUTPUT_CONTRACTS_BODY).toMatch(/Do not set `artifact_contract`/)
+    expect(OUTPUT_CONTRACTS_BODY).toMatch(/never implements/)
+    expect(OUTPUT_CONTRACTS_BODY).toMatch(/a planning invocation is not execution authority/)
+    expect(OUTPUT_CONTRACTS_BODY).toMatch(/Reserve the path with exclusive creation/)
+  })
+
+  test("rules relocated out of the kernel are stated on both the intake and deepen paths", () => {
+    const FINAL_REVIEW_BODY = readFileSync(path.join(process.cwd(), "skills/ce-plan/references/final-review.md"), "utf8")
+    const DEEPENING_BODY = readFileSync(path.join(process.cwd(), "skills/ce-plan/references/deepening-workflow.md"), "utf8")
+    // The deepen fast path (resume.md -> Phase 5.3) never loads intake.md or research.md.
+    for (const body of [INTAKE_BODY, FINAL_REVIEW_BODY]) expect(body).toMatch(/task-tracking capability/)
+    for (const body of [RESEARCH_BODY, DEEPENING_BODY]) expect(body).toMatch(/classify a rejected dispatch by whether an agent launched/)
+  })
+
+  test("Lightweight Durable grounds inline instead of dispatching research agents", () => {
+    expect(RESEARCH_BODY).toMatch(/\*\*Lightweight\*\* Durable plan does not dispatch the research agents/)
+    expect(RESEARCH_BODY).not.toContain("Local Research (Always Runs)")
   })
 })

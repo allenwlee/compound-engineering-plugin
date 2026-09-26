@@ -13,16 +13,34 @@ const VISUAL_PROBES_PATH = path.join(
   "skills/ce-brainstorm/references/visual-probes.md",
 )
 
+// 2026-08-18: the phase prose moved out of SKILL.md into per-phase references
+// when the body was restructured under the Codex 8000-byte prompt budget. The
+// tripwire, the Phase 1.3 gate, and Interaction Rule 7 are still asserted in
+// full -- against the file that now owns each of them, which the body names as
+// a required read at the point the rule fires.
+const INTERACTION_RULES = readFileSync(
+  path.join(process.cwd(), "skills/ce-brainstorm/references/interaction-rules.md"),
+  "utf8",
+)
+const PHASE_0 = readFileSync(
+  path.join(process.cwd(), "skills/ce-brainstorm/references/phase-0.md"),
+  "utf8",
+)
+const DIALOGUE = readFileSync(
+  path.join(process.cwd(), "skills/ce-brainstorm/references/dialogue.md"),
+  "utf8",
+)
+
 describe("ce-brainstorm visual probes", () => {
-  test("SKILL.md routes visual decisions through the visual-probes reference", () => {
+  test("Phase 1.3 routes visual decisions through the visual-probes reference", () => {
     expect(
       existsSync(VISUAL_PROBES_PATH),
       "ce-brainstorm must ship a visual-probes reference for the display-only visual feedback contract.",
     ).toBe(true)
 
-    const phase13Start = SKILL_BODY.indexOf("#### 1.3 Collaborative Dialogue")
+    const phase13Start = DIALOGUE.indexOf("#### 1.3 Collaborative Dialogue")
     expect(phase13Start).toBeGreaterThan(-1)
-    const phase13Region = SKILL_BODY.slice(phase13Start, phase13Start + 2500)
+    const phase13Region = DIALOGUE.slice(phase13Start, phase13Start + 2500)
 
     expect(
       /visual-probes\.md/i.test(phase13Region),
@@ -34,13 +52,49 @@ describe("ce-brainstorm visual probes", () => {
     ).toBe(true)
   })
 
-  test("SKILL.md exposes visual tripwires before the visual-probes reference is loaded", () => {
-    const scopeStart = SKILL_BODY.indexOf("#### 0.3 Assess Scope")
-    const dialogueStart = SKILL_BODY.indexOf("#### 1.3 Collaborative Dialogue")
+  test("Interaction Rules offer ce-prototype on unravel cost, not a phase gate", () => {
+    const rulesStart = INTERACTION_RULES.indexOf("## Interaction Rules")
+    expect(rulesStart).toBeGreaterThan(-1)
+    const rules = INTERACTION_RULES.slice(rulesStart)
+
+    // The body must still send every run into that file before the first
+    // question, or the rule above is unreachable.
+    expect(SKILL_BODY).toContain("references/interaction-rules.md")
+
+    expect(rules).toContain("ce-prototype")
+    expect(
+      /expensive to unravel|later planning and implementation will treat as given/i.test(rules),
+      "The prototype offer must key off decision impact / unravel cost, not UI-ness.",
+    ).toBe(true)
+    expect(
+      /not at a fixed phase|when you recognize that bar/i.test(rules),
+      "The prototype offer must be judgment-timed, not pinned to a phase.",
+    ).toBe(true)
+    expect(
+      /routine UI|known button|standard control/i.test(rules),
+      "The prototype offer must skip routine existing-pattern UI.",
+    ).toBe(true)
+    expect(
+      /cheap[^.]{0,60}sketch[^.]{0,60}settle|sketch[^.]{0,40}cannot settle/i.test(rules),
+      "Interaction Rule 7 owns this skill's routing test and must state it in full: the decision is expensive to unravel AND a cheap sketch cannot settle it. Every other routing site in ce-brainstorm cites this rule, so dropping the sketch half here leaves them citing an incomplete test.",
+    ).toBe(true)
+    expect(
+      /unravel cost is a precondition|cheap to reverse[^.]{0,60}(does not|doesn't) escalate|(does not|doesn't) escalate[^.]{0,60}cheap to reverse/i.test(
+        rules,
+      ),
+      "Unravel cost must read as a precondition, not decoration: a cheap-to-reverse decision does not escalate to ce-prototype however visual it is. Without that clause, widening the rule to visual decisions turns every styling choice into a prototype offer.",
+    ).toBe(true)
+    expect(rules).not.toMatch(/Phase 1\.3 `ce-prototype`/)
+  })
+
+  test("the phase references expose visual tripwires before visual-probes.md is loaded", () => {
+    const scopeStart = PHASE_0.indexOf("#### 0.3 Assess Scope")
+    const dialogueStart = DIALOGUE.indexOf("#### 1.3 Collaborative Dialogue")
     expect(scopeStart).toBeGreaterThan(-1)
     expect(dialogueStart).toBeGreaterThan(-1)
 
-    const liveRoutingRegion = SKILL_BODY.slice(scopeStart, dialogueStart + 3000)
+    const liveRoutingRegion =
+      PHASE_0.slice(scopeStart) + DIALOGUE.slice(dialogueStart, dialogueStart + 3000)
 
     expect(
       /drawing|canvas|visual editor|UI layout|interaction state/i.test(liveRoutingRegion),
@@ -59,10 +113,10 @@ describe("ce-brainstorm visual probes", () => {
       "Shape/behavior visual decisions must explicitly override the default blocking-question path.",
     ).toBe(true)
     expect(
-      /Use the platform's blocking question tool[^.]*text-vs-visual opt-in|Use the platform's blocking question tool[^.]*offer/i.test(
+      /blocking question tool already in the current tool list[^.]*text-vs-visual offer|blocking question tool already in the current tool list[^.]*offer/i.test(
         liveRoutingRegion,
       ),
-      "The text-vs-visual opt-in itself should use the platform's interactive question tool when available.",
+      "The text-vs-visual opt-in itself should use the host's blocking question tool already in the current tool list (issue #1522).",
     ).toBe(true)
     expect(
       /ASCII preview.*not.*satisf|preview.*not.*substitute/i.test(liveRoutingRegion),
@@ -138,7 +192,7 @@ describe("ce-brainstorm visual probes", () => {
       "visual probes must tell agents to resolve the helper from the loaded skill directory, not from the project CWD.",
     ).toBe(true)
     expect(
-      body.includes('node "$SKILL_DIR/scripts/visual-probe-server.js"'),
+      body.includes('node "$SKILL_DIR/scripts/light-webserver.js"'),
       "visual probes should invoke the helper via the SKILL_DIR anchor (the repo's Tier-3 executed-command convention), not a vague resolved-path placeholder.",
     ).toBe(true)
     expect(

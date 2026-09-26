@@ -6,9 +6,11 @@ const AGENT_PATH = path.join(
   process.cwd(),
   "skills/ce-compound/references/agents/session-historian.md",
 )
+// The session-history flow moved into the reference the body names at that step;
+// its dispatch and repo-filter invariants moved with it.
 const COMPOUND_SKILL_PATH = path.join(
   process.cwd(),
-  "skills/ce-compound/SKILL.md",
+  "skills/ce-compound/references/session-history.md",
 )
 const AGENT_BODY = readFileSync(AGENT_PATH, "utf8")
 const COMPOUND_SKILL_BODY = readFileSync(COMPOUND_SKILL_PATH, "utf8")
@@ -78,7 +80,7 @@ describe("session-historian prompt no-Skill-tool regression guard", () => {
 describe("session-historian omp platform contract", () => {
   test("input, synthesis, and output contracts include omp", () => {
     expect(AGENT_BODY).toContain("`platform` — `claude`, `codex`, `cursor`, `pi`, or `omp`")
-    expect(AGENT_BODY).toContain("`cwd` — working directory when present (Codex, Pi, and omp)")
+    expect(AGENT_BODY).toContain("`cwd` — working directory when present (Claude, Codex, Pi, and omp)")
     expect(AGENT_BODY).toContain("Claude Code + Codex + Cursor + Pi + omp")
     expect(AGENT_BODY).toContain("[N] Pi, [N] omp")
   })

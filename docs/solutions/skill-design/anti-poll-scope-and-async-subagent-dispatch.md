@@ -1,5 +1,5 @@
 ---
-title: "Scope anti-poll discipline to detached CLI delegates, and write subagent-dispatch concurrency to the least-capable async primitive"
+title: "Scope anti-poll discipline to detached CLI delegates, and collect subagents by observed return shape"
 date: 2026-07-21
 category: skill-design
 module: skill-design
@@ -22,13 +22,13 @@ applies_when:
   - "Reviewing a skill that dispatches multiple reviewers or workers in parallel"
 ---
 
-# Scope anti-poll discipline to detached CLI delegates, and write subagent-dispatch concurrency to the least-capable async primitive
+# Scope anti-poll discipline to detached CLI delegates, and collect subagents by observed return shape
 
 ## Context
 
-This repository authors each skill once and converts it for Claude Code, Codex, Cursor, and Gemini. A skill's dispatch rules therefore run against whatever subagent primitive the host exposes, and those primitives are not interchangeable. Reworking `ce-code-review`'s reviewer dispatch (PR #1214, addressing issue #1192) surfaced two recurring traps in how subagent-concurrency rules get written — traps that a Claude-Code-only author cannot see locally because Claude Code's batch semantics silently paper over both.
+This repository authors each skill once and converts it for Claude Code, Codex, Cursor, and Gemini. A skill's dispatch rules therefore run against whatever subagent primitive the host exposes, and those primitives are not interchangeable. Reworking `ce-code-review`'s reviewer dispatch (PR #1214, addressing issue #1192) exposed the first portability gap: an asynchronous primitive needs explicit collection and slot cleanup. Issue #1523 exposed the inverse gap: even a call requested as foreground may return an asynchronous launch receipt in Claude print mode. Host identity and requested background mode are therefore not reliable dispatch semantics.
 
-The relevant history: the anti-poll discipline (`docs/solutions/skill-design/detached-job-lifecycle-for-delegated-work.md`) was written for the retired ce-work-beta failure mode — a *detached* bash/CLI job plus a foreground `sleep`/status-file poll loop that burned turns waiting on delegated work. PR #1159 over-applied that discipline: it read "no background / no polling" as a ban on *any* concurrency near subagent dispatch and serialized local reviewer dispatch strictly one-at-a-time. PR #1031 had earlier established bounded concurrency. PR #1214 reconciled the two and made the rule portable.
+The relevant history: the anti-poll discipline (`docs/solutions/skill-design/detached-job-lifecycle-for-delegated-work.md`) was written for the retired ce-work-beta failure mode — a *detached* bash/CLI job plus a foreground `sleep`/status-file poll loop that burned turns waiting on delegated work. PR #1159 over-applied that discipline: it read "no background / no polling" as a ban on *any* concurrency near subagent dispatch and serialized local reviewer dispatch strictly one-at-a-time. PR #1031 had earlier established bounded concurrency. PR #1214 reconciled the two for the primitives then observed; issue #1523 supplied the missing print-mode evidence.
 
 ## Guidance
 
@@ -40,26 +40,29 @@ The "no background / no polling / no wakeups" discipline governs *detached* dele
 
 Conflating the two is what made #1159 serialize local reviewer dispatch one-at-a-time, costing 45-70 minutes of wall-clock on large diffs for zero determinism or token benefit — reviewers are independent by construction (none is fed another's output), so batch composition and completion order cannot change any finding. `dispatch-reviewers.md` now draws the line explicitly: the detached cross-model peer "is the only detached work and overlaps with this batch; it does not require serializing harness-managed subagents, which return on their own tool call with no poll loop."
 
-### 2. Write subagent-concurrency rules to the least-capable async primitive
+### 2. Collect by observed return shape
 
-A rule shaped for Claude Code assumes N `Agent` calls in one message return **together** in a single blocking wait — the harness collects all returns for you. That assumption breaks on Codex, whose `spawn_agent` is asynchronous:
+A portable rule classifies what dispatch actually returned:
 
-- A single `wait_agent` returns the **first** finisher, not an all-results barrier.
-- A completed agent keeps **occupying its concurrency slot** until `close_agent` is called; awaiting does not free the slot.
+- **Terminal outcome:** the launch is collected. Consume a valid compact result; classify a terminal tool error or malformed output under the workflow's failed/degraded rules.
+- **Launch identifier or asynchronous receipt:** a launch receipt means the reviewer is uncollected. Use the host's blocking collection capability until the launch reaches a terminal outcome. That outcome may arrive as the call's own return, as a blocking wait's return, or as a host-delivered terminal message that names the launch and carries its final payload; a status or progress update is none of these.
+- **No reliable blocking collector:** the host offers no in-turn way to reach a terminal outcome for the launch. Stop the launched work and take the workflow's failure or degraded path. Fail closed only after discharging lifecycle obligations for detached work already started. Never end the turn to wait, emit progress-only output, or synthesize a partial roster.
 
-So a portable rule needs three explicit clauses that Claude Code's implicit batch never forced you to write:
+The same classification governs both reviewer batches and later validator batches, and both waits have an end (#1679, #1689): each subagent writes its result to a file in the run directory, the orchestrator repeats the host's blocking wait back to back until that file or a terminal outcome lands or an aggregate wall-clock limit passes, and a file missing at the limit is a failed reviewer or validator infrastructure failure rather than "still running". A blocking call that cannot be bounded is not a collector for that batch, and a host whose single wait is short reaches the limit by repeating it. A foreground request is an intent, not evidence that a result arrived. Judge a collector by its live contract, not its name: a wait counts only when it blocks until terminal, and a message counts only when it identifies the launch and carries the payload. Issue #1654 showed why the rule must be the condition rather than a tool shape: Codex delivers a subagent's final answer as a host message tagged with the launch's task name while `wait_agent` reports status, so a rule demanding one ID-addressed collector that returns the outcome failed closed on a host that could collect.
 
-- **(a) Collect every spawned agent before synthesis.** Wait repeatedly until all spawned agent ids have returned. Never proceed to synthesis on a partial roster because only the first was awaited. These repeated collection waits are how an async batch is gathered — they are *not* the forbidden detached-delegate poll loop.
-- **(b) Close each completed async agent before refilling its freed slot.** Awaiting alone does not free the slot; once the roster exceeds the cap, refilling without closing hits capacity backpressure forever.
-- **(c) A partial-roster guard.** Stage 5 (synthesis) must never run until the whole batch is collected.
+For an asynchronous primitive, the rule still needs three explicit clauses:
+
+- **Collect the complete roster.** Native collection continues until every successful launch reaches a terminal outcome. These harness-managed waits are not the forbidden detached-delegate poll loop.
+- **Release collected agents when the primitive retains slots.** A completed agent can keep occupying its concurrency slot until explicitly closed; release it before refilling and before the validator stage.
+- **Guard the transition.** Synthesis cannot begin on launch receipts or a partial roster. If complete collection is unavailable, return the mode-appropriate failure instead.
 
 On a harness that does not run same-message calls concurrently, this identical dispatch degrades to serial automatically — the correct floor, not a failure.
 
 ## Why This Matters
 
-Both defects were caught by Codex's own review of PR #1214 — a P1 for the partial-roster gap (synthesizing on the first finisher) and a P2 for the slot-cleanup gap (refill deadlock without `close_agent`). A Claude-Code-only author would not have hit either locally, because Claude Code's single blocking wait hides both.
+Codex review of PR #1214 caught a partial-roster gap and a slot-cleanup gap in its asynchronous primitive. The resulting host-name split still assumed Claude Code supplied an all-return barrier. Issue #1523 falsified that assumption: Claude `-p` recorded local reviewers as background work despite foreground requests, then hit its print-mode background ceiling without returning final review JSON.
 
-The deeper lesson: the determinism and token wins of a change can be entirely real while the cross-harness dispatch rule is silently broken on a harness you didn't test against. Cross-model skills fail on the primitive you didn't test. When a rule encodes concurrency or pool/refill semantics, "it works here" is evidence about one primitive, not the contract.
+The deeper lesson is that a harness label describes neither every version nor every execution mode. When a rule encodes concurrency or pool/refill semantics, the observable result is the contract: a terminal outcome means collected and ready for validation; a receipt means collection remains; no reliable collection path means fail closed.
 
 ## When to Apply
 
@@ -70,25 +73,9 @@ Apply whenever a skill:
 
 Check three questions:
 
-1. Does the rule assume same-message calls **return together**? (Breaks on async `spawn_agent`.)
+1. Does the rule treat a foreground request or host name as proof that calls **returned together**?
 2. Does it free pool slots by **awaiting alone**? (Deadlocks without an explicit close.)
 3. Does it distinguish **detached-delegate polling** (banned) from **harness subagent waits** (fine)? (Conflating them serializes for no benefit.)
-
-## Examples
-
-**Before (Claude-only, PR #1159 shape):** dispatch as a foreground concurrent batch; "let that single blocking wait return all their compact JSON together ... no polling, status calls, or per-reviewer waits are needed." Correct on Claude Code; on Codex it awaits one agent and synthesizes on a partial roster, and never frees slots.
-
-**After (portable, PR #1214):** the same Claude-Code batch clause, plus an explicit async-subagent clause — spawn the whole batch, then collect every spawned reviewer before synthesis (waiting repeatedly until all ids return), close each async reviewer after collecting its result and before refilling its freed slot, and never let synthesis run on a partial roster. The anti-poll ban is re-pointed at *detached-delegate* polling: "What is banned is turning local review into a *detached* delegate the orchestrator must poll ... it does not require serializing harness-managed subagents."
-
-Primitive contrast:
-
-| Aspect | Claude Code `Agent` | Codex `spawn_agent` / `wait_agent` / `close_agent` |
-|---|---|---|
-| Batch of N in one message | All return together in one blocking wait | Each spawn returns an id; async |
-| One wait call | Returns all results | Returns the **first** finisher only |
-| Collecting the full roster | Implicit (harness batches) | Explicit: wait repeatedly until every id returned |
-| Freeing a concurrency slot | Automatic on return | Requires explicit `close_agent`; await does not free it |
-| Partial-roster risk | None (all-return barrier) | Real: synthesizing after the first wait |
 
 ## See Also
 

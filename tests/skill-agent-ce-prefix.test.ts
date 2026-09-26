@@ -14,6 +14,8 @@ const REF = `AGENTS.md "Naming Convention"`
 const SKILL_EXEMPTIONS = new Set<string>([
   // lfg ships as the public command `/lfg` (see README.md).
   "lfg",
+  // wtf ships as the public command `/wtf`: the name is what a confused user types.
+  "wtf",
 ])
 function frontmatterName(filePath: string): string {
   const { data } = parseFrontmatter(readFileSync(filePath, "utf8"), filePath)
@@ -36,7 +38,11 @@ function collectMarkdownFiles(root: string): string[] {
 
 describe("compound-engineering skill ce- prefix", () => {
   const skillDirs = readdirSync(SKILLS_DIR, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && !SKILL_EXEMPTIONS.has(entry.name))
+    .filter((entry) =>
+      entry.isDirectory()
+      && existsSync(path.join(SKILLS_DIR, entry.name, "SKILL.md"))
+      && !SKILL_EXEMPTIONS.has(entry.name)
+    )
     .map((entry) => entry.name)
 
   for (const dirName of skillDirs) {

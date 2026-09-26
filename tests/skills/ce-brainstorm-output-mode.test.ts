@@ -15,6 +15,16 @@ const HANDOFF_PATH = path.join(
 )
 const HANDOFF_BODY = readFileSync(HANDOFF_PATH, "utf8")
 
+const OUTPUT_MODE_BODY = readFileSync(
+  path.join(process.cwd(), "skills/ce-brainstorm/references/output-mode.md"),
+  "utf8",
+)
+
+const PLAN_WRITE_BODY = readFileSync(
+  path.join(process.cwd(), "skills/ce-brainstorm/references/plan-write.md"),
+  "utf8",
+)
+
 const HTML_OUTPUT_PATH = path.join(
   process.cwd(),
   "skills/ce-brainstorm/references/html-rendering.md",
@@ -25,6 +35,13 @@ const HTML_OUTPUT_PATH = path.join(
 // (config key `brainstorm_output` instead of `plan_output`) and the same
 // pipeline-mode force-`md` rule. The HTML composition reference is duplicated
 // byte-for-byte from ce-plan (enforced by tests/compound-support-files.test.ts).
+// 2026-08-18: Phase 0.0's resolution steps moved out of SKILL.md into
+// references/output-mode.md when the body was restructured under the Codex
+// 8000-byte prompt budget. Those steps are an artifact/behavior invariant, not
+// a window-deciding one -- Phase 0.0 is the first thing a run does and the body
+// names the required read at that point -- so they are asserted against the file
+// that now owns them. The two rules that must fire without any read (the mode is
+// exclusive; markdown unless HTML was requested) stay pinned to the body further down.
 describe("ce-brainstorm output:html mode", () => {
   test("argument-hint advertises output:html", () => {
     const frontmatterMatch = SKILL_BODY.match(/^---\n([\s\S]*?)\n---/)
@@ -37,13 +54,8 @@ describe("ce-brainstorm output:html mode", () => {
     ).toBe(true)
   })
 
-  test("SKILL.md describes the Output Mode resolution inline", () => {
-    const phaseStart = SKILL_BODY.indexOf("#### 0.0")
-    expect(
-      phaseStart,
-      "ce-brainstorm SKILL.md is missing the Phase 0.0 Output Mode resolution section.",
-    ).toBeGreaterThan(-1)
-    const phaseRegion = SKILL_BODY.slice(phaseStart, phaseStart + 4500)
+  test("references/output-mode.md carries the Output Mode resolution", () => {
+    const phaseRegion = OUTPUT_MODE_BODY
 
     expect(
       /output:/.test(phaseRegion),
@@ -53,10 +65,8 @@ describe("ce-brainstorm output:html mode", () => {
       /brainstorm_output/.test(phaseRegion),
       "Phase 0.0 must name the `brainstorm_output` config key (the ce-brainstorm parallel to ce-plan's `plan_output`).",
     ).toBe(true)
-    expect(
-      /pipeline|disable-model-invocation/i.test(phaseRegion),
-      "Phase 0.0 must describe the pipeline-mode override that forces markdown.",
-    ).toBe(true)
+    // Decision 2026-09-10: no pipeline override. Format comes only from the prompt, a user preference, config, or the default; a headless run resolves it the same way. Pin the absence.
+    expect(/\*\*Pipeline override\.\*\*|forces? `?(OUTPUT_FORMAT=)?md`? regardless/i.test(phaseRegion)).toBe(false)
     expect(
       /literal[\s-]prefix|literal prefix/i.test(phaseRegion),
       "Phase 0.0 must state the literal-prefix token-parsing convention.",
@@ -78,8 +88,7 @@ describe("ce-brainstorm output:html mode", () => {
     // `brainstorm_output: md|html`" would match the commented examples in
     // the shipped config template. The fix is principle-level: require an
     // ACTIVE (non-commented) key.
-    const phaseStart = SKILL_BODY.indexOf("#### 0.0")
-    const phaseRegion = SKILL_BODY.slice(phaseStart, phaseStart + 4500)
+    const phaseRegion = OUTPUT_MODE_BODY
     expect(
       /active.*non-commented|non-commented.*key|lines starting with `#`.*comments|ignore commented/i.test(phaseRegion),
       "Phase 0.0 config matching must require an ACTIVE (non-commented) `brainstorm_output:` key, not a raw-text 'contains' match.",
@@ -98,8 +107,7 @@ describe("ce-brainstorm output:html mode", () => {
     // Parity with ce-plan side. Hardcoding "defaulting to md" misleads users
     // when config has set HTML. The note must reflect the actual resolved
     // OUTPUT_FORMAT after all precedence steps complete.
-    const phaseStart = SKILL_BODY.indexOf("#### 0.0")
-    const phaseRegion = SKILL_BODY.slice(phaseStart, phaseStart + 4500)
+    const phaseRegion = OUTPUT_MODE_BODY
     expect(
       /using <resolved_format>|reflect.*final.*mode|after final resolution|after steps 2-4|Do not hardcode `md`/i.test(phaseRegion),
       "Phase 0.0's unknown-value note must reflect the actual resolved OUTPUT_FORMAT after all precedence steps, not a hardcoded 'defaulting to md'.",
@@ -110,8 +118,7 @@ describe("ce-brainstorm output:html mode", () => {
     // Asymmetric output is acceptable. ce-plan re-resolves its own
     // `plan_output` config independently. The SKILL.md should make this
     // explicit so users with mismatched config aren't surprised.
-    const phaseStart = SKILL_BODY.indexOf("#### 0.0")
-    const phaseRegion = SKILL_BODY.slice(phaseStart, phaseStart + 4500)
+    const phaseRegion = OUTPUT_MODE_BODY
     expect(
       /does NOT auto-propagate|does not auto-propagate|re-resolves its own/i.test(phaseRegion),
       "ce-brainstorm SKILL.md must state that the output: preference does not auto-propagate to ce-plan on handoff (ce-plan re-resolves its own plan_output independently).",
@@ -119,9 +126,9 @@ describe("ce-brainstorm output:html mode", () => {
   })
 
   test("Phase 3 points at brainstorm-sections.md + a rendering ref", () => {
-    const phase3Start = SKILL_BODY.indexOf("### Phase 3:")
+    const phase3Start = SKILL_BODY.indexOf("| 3 write the plan")
     expect(phase3Start).toBeGreaterThan(-1)
-    const phase3Region = SKILL_BODY.slice(phase3Start, phase3Start + 2500)
+    const phase3Region = SKILL_BODY.slice(phase3Start) + PLAN_WRITE_BODY
     expect(
       /references\/brainstorm-sections\.md|brainstorm-sections\.md/i.test(phase3Region),
       "Phase 3 must point at brainstorm-sections.md for the content contract.",
@@ -132,18 +139,22 @@ describe("ce-brainstorm output:html mode", () => {
     ).toBe(true)
   })
 
-  test("handoff.md option 4 is format-keyed (Proof for md, browser for html)", () => {
+  test("handoff.md offers prototype on software menus and browser for HTML", () => {
     expect(
       /Open in browser/.test(HANDOFF_BODY),
       "handoff.md must include 'Open in browser' for HTML mode.",
     ).toBe(true)
     expect(
-      /Publish to Proof/.test(HANDOFF_BODY),
-      "handoff.md must include 'Publish to Proof' for markdown mode.",
+      /Prototype a remaining feel-question/.test(HANDOFF_BODY),
+      "handoff.md must include the prototype offer.",
     ).toBe(true)
     expect(
-      /OUTPUT_FORMAT=md|OUTPUT_FORMAT=html|format-keyed|exclusive output/i.test(HANDOFF_BODY),
-      "handoff.md must state the format-keyed selection for option 4 under exclusive output mode.",
+      /Publish to Proof/.test(HANDOFF_BODY),
+      "software brainstorm Phase 4 must omit Share to Proof.",
+    ).toBe(false)
+    expect(
+      /OUTPUT_FORMAT=md|OUTPUT_FORMAT=html|exclusive output/i.test(HANDOFF_BODY),
+      "handoff.md must state HTML-only browser rendering.",
     ).toBe(true)
   })
 

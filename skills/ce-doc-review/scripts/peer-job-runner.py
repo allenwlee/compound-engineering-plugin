@@ -25,9 +25,11 @@ Job directory (durable state, the source of truth):
     meta.json   identity: skill, run id, label, input digest, start time,
                 worker argv, result path (written at start, before detach)
     pid         supervisor pid + worker pid (written by the supervisor before
-                start returns; its presence marks "detached"). Two fields are
-                platform-conditional, so consumers must use .get(): POSIX adds
-                supervisor_pgid, Windows adds job_name (its job object).
+                start returns; its presence marks "detached"). Platform-
+                conditional fields — consumers must use .get(): POSIX adds
+                supervisor_pgid; Windows adds job_name (its job object) and
+                supervisor_identity / worker_identity (GetProcessTimes guards
+                so a recycled pid is not treated as the original process).
     out.log     worker's combined stdout+stderr (byte growth = liveness)
     reason      terminal detail, written before the status rename so the
                 status file is always the LAST record to land
@@ -58,7 +60,10 @@ outcome exactly once; when both the worker's internal cap and the
 supervisor's window fire, the supervisor's record wins.
 
 Environment overrides (defaults in parentheses):
-  CE_PEER_JOBS_ROOT         base dir (/tmp/compound-engineering-<effective-uid>)
+  CE_PEER_JOBS_ROOT         base dir (/tmp/compound-engineering-<effective-uid>,
+                            or $TMPDIR/compound-engineering-<effective-uid> when
+                            /tmp cannot host a writable private root, e.g. under
+                            a sandbox that only allowlists $TMPDIR)
   CE_WORK_RUNS_ROOT         parent CE Work dir containing all <run-id>/ dirs
   CE_PEER_IDLE_SECS         idle window, no out.log growth (240)
   CE_PEER_HARD_SECS         hard cap on worker wall clock
@@ -103,7 +108,10 @@ POSIX path is behaviorally unchanged:
             handle closes, so a cmd_reap running after the supervisor died
             falls back to a Toolhelp32 snapshot walk; that works because
             Windows never reparents orphans, so a dead pid still appears as
-            th32ParentProcessID on its live children.
+            th32ParentProcessID on its live children. A recycled pid that is
+            now this process (or whose GetProcessTimes identity does not
+            match the pid file) is not the original leader: sweep stale-PPID
+            descendants, do not TerminateProcess the live reused process.
   ownership st_uid == geteuid becomes: the object's owner SID is one this token
             creates objects as (user or default-owner SID), checked on the opened
             handle (GetSecurityInfo) exactly like the POSIX fstat-by-fd check.
@@ -162,6 +170,7 @@ O_BINARY = getattr(os, "O_BINARY", 0)
 SWEEP_AGE_SECS = 24 * 3600
 CLAIM_ATTEMPTS = 16
 STATUS_READ_CAP = 256
+REASON_READ_CAP = 1024
 META_READ_CAP = 64 * 1024
 
 EXIT_CODES_DOC = """\
@@ -174,8 +183,10 @@ exit codes:
   2  usage error; for `result`: the job is still running
   3  for `result`: job settled but not done (failed / timeout /
      died-without-result / never-started), or the result file is missing
-  4  ownership check failed (job state or result not owned by the current
-     user) — content is never emitted
+  4  the read was refused, so content is never emitted: the ownership check
+     failed (job state or result not owned by the current user), or the path
+     is there but unreadable (a symlink rejected by O_NOFOLLOW, a non-regular
+     file, a byte-cap overrun). Only a genuinely absent file is 3.
 
 environment overrides: CE_PEER_JOBS_ROOT, CE_WORK_RUNS_ROOT, CE_PEER_IDLE_SECS,
 CE_PEER_HARD_SECS, CROSS_MODEL_HARD_SECS, CE_PEER_LOG_MAX_BYTES,
@@ -202,19 +213,74 @@ _RUNNER_HARD_FLOOR = 1230.0
 _RUNNER_HARD_GRACE = 30.0
 
 
+def _private_root_usable(path: str) -> bool:
+    """True when `path` is (or can now be) a directory we own and can write into.
+
+    Creation is the probe: a sandbox that denies writes under /tmp refuses the
+    mkdir, and one that lets a pre-existing root stand still fails the access
+    check, so both land on the fallback instead of failing at the first job.
+    """
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        return False
+    try:
+        _check_owned_dir(path)
+    except (OSError, RunnerError):
+        return False
+    return os.access(path, os.W_OK)
+
+
+def _fallback_root() -> str:
+    return os.path.join(os.environ.get("TMPDIR") or "/tmp", f"compound-engineering-{_EFFECTIVE_UID}")
+
+
 def jobs_root_base() -> str:
     configured = os.environ.get("CE_PEER_JOBS_ROOT")
     if configured:
         return os.path.abspath(configured)
     if DEFAULT_ROOT is None:
         raise RunnerError("effective user ID is unavailable; cannot derive the jobs root")
-    return os.path.abspath(DEFAULT_ROOT)
+    if IS_WINDOWS or _private_root_usable(DEFAULT_ROOT):
+        return os.path.abspath(DEFAULT_ROOT)
+    # Same order and candidates as the skills' shell preamble, so a job started
+    # there is found here.
+    return os.path.abspath(_fallback_root())
+
+
+def candidate_jobs_root_bases() -> list:
+    """Every root an existing job may live under: the configured root alone, or
+    both the /tmp root and the $TMPDIR fallback (deduplicated, primary first).
+
+    Creation uses jobs_root_base(); lookup of an already-started job must not
+    depend on which root *this* invocation would create under, because a
+    sandboxed session and a later unsandboxed one resolve different roots.
+    """
+    configured = os.environ.get("CE_PEER_JOBS_ROOT")
+    if configured:
+        return [os.path.abspath(configured)]
+    if DEFAULT_ROOT is None:
+        raise RunnerError("effective user ID is unavailable; cannot derive the jobs root")
+    bases = [os.path.abspath(DEFAULT_ROOT)]
+    if not IS_WINDOWS:
+        fallback = os.path.abspath(_fallback_root())
+        if fallback not in bases:
+            bases.append(fallback)
+    return bases
 
 
 def skill_runs_root(skill: str) -> str:
     if skill == "ce-work" and os.environ.get("CE_WORK_RUNS_ROOT"):
         return os.path.abspath(os.environ["CE_WORK_RUNS_ROOT"])
     return os.path.join(jobs_root_base(), skill)
+
+
+def candidate_skill_runs_roots(skill: str) -> list:
+    if skill == "ce-work" and os.environ.get("CE_WORK_RUNS_ROOT"):
+        return [os.path.abspath(os.environ["CE_WORK_RUNS_ROOT"])]
+    return [os.path.join(base, skill) for base in candidate_jobs_root_bases()]
 
 
 def _env_num(name: str, default: float, conv, *, allow_zero: bool = False):
@@ -320,6 +386,18 @@ if IS_WINDOWS:
     _kernel32.OpenProcess.argtypes = [
         wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    _kernel32.GetProcessTimes.restype = wintypes.BOOL
+    _kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD)]
+    _kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
     _kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     _kernel32.WaitForSingleObject.restype = wintypes.DWORD
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -394,15 +472,11 @@ if IS_WINDOWS:
     _kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
     _kernel32.TerminateProcess.restype = wintypes.BOOL
 
-    def _win_descendants_deepest_first(root_pid: int):
-        """Children before parents, via a process snapshot. This is the direct
-        analog of the POSIX `ps`-based walk and carries the same pid-reuse
-        exposure. It works on an EXITED leader because Windows never reparents
-        orphans: a dead pid still appears as th32ParentProcessID on its live
-        children (unlike POSIX, where orphans are reparented to init)."""
+    def _win_process_children_map():
+        """th32ParentProcessID -> [child pids] from one Toolhelp snapshot."""
         snap = _kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
         if not snap or snap == ctypes.c_void_p(-1).value:
-            return []
+            return {}
         children = {}
         try:
             entry = _PROCESSENTRY32W()
@@ -414,6 +488,16 @@ if IS_WINDOWS:
                 more = _kernel32.Process32NextW(snap, ctypes.byref(entry))
         finally:
             _kernel32.CloseHandle(ctypes.c_void_p(snap))
+        return children
+
+    def _win_descendants_deepest_first(root_pid: int, children=None):
+        """Children before parents, via a process snapshot. This is the direct
+        analog of the POSIX `ps`-based walk and carries the same pid-reuse
+        exposure. It works on an EXITED leader because Windows never reparents
+        orphans: a dead pid still appears as th32ParentProcessID on its live
+        children (unlike POSIX, where orphans are reparented to init)."""
+        if children is None:
+            children = _win_process_children_map()
         order, queue = [], [root_pid]
         while queue:
             for child in children.get(queue.pop(0), []):
@@ -421,7 +505,58 @@ if IS_WINDOWS:
                 queue.append(child)
         return list(reversed(order))
 
+    def _win_process_identity(pid: int):
+        """Creation time plus image path — analog of `ps -o lstart= -o command=`.
+
+        Creation time is the PID-reuse guard: Windows recycles PIDs aggressively,
+        and a recycled pid always carries a later FILETIME than the worker we
+        recorded. None means unproven (gone or unopenable)."""
+        handle = _kernel32.OpenProcess(
+            _PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        try:
+            created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+            if not _kernel32.GetProcessTimes(
+                    handle, ctypes.byref(created), ctypes.byref(exited),
+                    ctypes.byref(kernel), ctypes.byref(user)):
+                return None
+            started = (created.dwHighDateTime << 32) | created.dwLowDateTime
+            if not started:
+                return None
+            size = wintypes.DWORD(32768)
+            buf = ctypes.create_unicode_buffer(size.value)
+            image = (buf.value if _kernel32.QueryFullProcessImageNameW(
+                handle, 0, buf, ctypes.byref(size)) else "")
+        finally:
+            _kernel32.CloseHandle(handle)
+        return "{} {}".format(started, image)
+
+    def _win_process_start_time(pid: int):
+        handle = _kernel32.OpenProcess(
+            _PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        try:
+            created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+            if not _kernel32.GetProcessTimes(
+                    handle, ctypes.byref(created), ctypes.byref(exited),
+                    ctypes.byref(kernel), ctypes.byref(user)):
+                return None
+            started = (created.dwHighDateTime << 32) | created.dwLowDateTime
+            return started or None
+        finally:
+            _kernel32.CloseHandle(handle)
+
+    def _win_process_identity_matches(pid: int, recorded) -> bool:
+        if not recorded:
+            return True
+        current = _win_process_identity(pid)
+        return current is not None and current == recorded
+
     def _win_terminate_pid(pid: int) -> bool:
+        if pid <= 0 or pid == os.getpid():
+            return False
         handle = _kernel32.OpenProcess(_PROCESS_TERMINATE, False, pid)
         if not handle:
             return False
@@ -610,7 +745,9 @@ if IS_WINDOWS:
         finally:
             _kernel32.CloseHandle(handle)
 
-    def _win_kill_tree(root_pid: int, grace: float, job_name=None) -> bool:
+    def _win_kill_tree(
+        root_pid: int, grace: float, job_name=None, expected_identity=None,
+    ) -> bool:
         """Terminate the worker tree (KTD3). Returns whether the LEADER was
         alive when the kill began -- the reap classification signal -- which is
         independent of how much of the tree we then sweep.
@@ -632,19 +769,49 @@ if IS_WINDOWS:
         fails with ERROR_FILE_NOT_FOUND). So a cmd_reap running after the
         supervisor died cannot use it, and falls back to the snapshot walk --
         which is exactly the dead-leader case, hence deepest-first descendants
-        BEFORE the leader, and never gated on leader liveness."""
-        alive = _win_pid_alive(root_pid)
+        BEFORE the leader, and never gated on leader liveness.
+
+        A live pid at root_pid is not automatically the original leader:
+        Windows recycles PIDs, and cmd_reap is often the next python.exe after
+        the worker exits (the orphan-grandchild smoke). Never terminate this
+        process, and never terminate a live pid whose GetProcessTimes identity
+        does not match the recorded worker. Stale-PPID orphans still show the
+        dead leader as parent. When the pid was reused, the start-time cutoff
+        applies only to *direct* children of that pid (the new process's own
+        children vs stale-PPID orphans). A pre-reuse child's full subtree is
+        still original-tree work, including descendants spawned after reuse."""
+        self_pid = os.getpid()
+        is_self = root_pid == self_pid
+        alive = (not is_self) and _win_pid_alive(root_pid)
+        recorded_leader = alive and _win_process_identity_matches(
+            root_pid, expected_identity)
         if job_name:
             _win_terminate_job(job_name)
         # Always Toolhelp-sweep after (or without) the job terminate: children
         # that raced outside the job before AssignProcessToJobObject completed
         # are not members, and TerminateJobObject alone would leave them.
         # CREATE_SUSPENDED closes that spawn race; this remains the belt.
-        for pid in _win_descendants_deepest_first(root_pid):
+        children_map = _win_process_children_map()
+        reuse_cutoff = None
+        if not recorded_leader and (is_self or alive):
+            reuse_cutoff = _win_process_start_time(root_pid)
+        if reuse_cutoff is not None:
+            def _predates_reuse(pid):
+                started = _win_process_start_time(pid)
+                return started is None or started < reuse_cutoff
+            kill_set = _pre_reuse_descendant_pids(
+                root_pid, children_map, _predates_reuse, self_pid)
+        else:
+            kill_set = None
+        for pid in _win_descendants_deepest_first(root_pid, children_map):
+            if pid == self_pid:
+                continue
+            if kill_set is not None and pid not in kill_set:
+                continue
             _win_terminate_pid(pid)
-        if alive:
+        if recorded_leader:
             _win_terminate_pid(root_pid)
-        return alive
+        return recorded_leader
 
 
 # --- hardened I/O primitives --------------------------------------------------
@@ -824,14 +991,14 @@ def resolve_job_dir(ref: str, skill=None) -> str:
     if skill is not None:
         if not _is_safe_token(skill):
             raise RunnerError(f"invalid skill: {skill!r}")
-        search_root = skill_runs_root(skill)
-        patterns = [os.path.join(search_root, "*", "jobs", ref)]
+        search_roots = candidate_skill_runs_roots(skill)
+        patterns = [os.path.join(root, "*", "jobs", ref) for root in search_roots]
     else:
-        search_root = jobs_root_base()
-        patterns = [os.path.join(search_root, "*", "*", "jobs", ref)]
+        search_roots = candidate_jobs_root_bases()
+        patterns = [os.path.join(root, "*", "*", "jobs", ref) for root in search_roots]
     matches = sorted({match for pattern in patterns for match in glob.glob(pattern)})
     if not matches:
-        raise RunnerError(f"job not found under {search_root}: {ref}")
+        raise RunnerError(f"job not found under {', '.join(search_roots)}: {ref}")
     if len(matches) > 1:
         raise RunnerError(f"ambiguous job id {ref}: {len(matches)} matches; pass the job dir path")
     return matches[0]
@@ -853,6 +1020,16 @@ def job_state(job_dir: str) -> str:
     if os.path.lexists(os.path.join(job_dir, "pid")):
         return "running"
     return "never-started"
+
+
+def job_reason(job_dir: str) -> str:
+    """The terminal record's detail line, or "" when unavailable. Decorative
+    context for a message; never load-bearing, so every failure reads as ""."""
+    try:
+        raw = read_owned(os.path.join(job_dir, "reason"), REASON_READ_CAP)
+    except (Unreadable, OSError):
+        return ""
+    return raw.decode("utf-8", "replace").strip()
 
 
 # --- process-tree control -----------------------------------------------------
@@ -945,14 +1122,44 @@ def _signal_group_or_tree(pid: int, sig: int) -> None:
         _kill_quiet(pid, sig)
 
 
-def kill_tree(root_pid: int, grace: float, job_name=None) -> bool:
+def _pre_reuse_descendant_pids(root_pid, children, predates_reuse, skip_pid=None):
+    """Direct children that predate a recycled leader pid, plus each of those
+    children's full subtree.
+
+    Toolhelp still lists the original tree under a dead pid as parent, mixed
+    with the new process's own children. The start-time cutoff applies only to
+    direct children. A pre-reuse child's later descendants stay original-tree
+    work even if they started after the reuse.
+    """
+    keep = set()
+    queue = []
+    for child in children.get(root_pid, []):
+        if skip_pid is not None and child == skip_pid:
+            continue
+        if not predates_reuse(child):
+            continue
+        queue.append(child)
+    while queue:
+        pid = queue.pop(0)
+        if skip_pid is not None and pid == skip_pid:
+            continue
+        if pid in keep:
+            continue
+        keep.add(pid)
+        queue.extend(children.get(pid, []))
+    return keep
+
+
+def kill_tree(root_pid: int, grace: float, job_name=None, expected_identity=None) -> bool:
     """TERM the pid's process group (workers are started as group leaders),
     falling back to a deepest-first tree walk; grace, then KILL survivors.
 
     `job_name` is Windows-only (the worker's job object, the pgid analog) and
-    is ignored on POSIX, where the pgid is derived from the pid itself."""
+    is ignored on POSIX, where the pgid is derived from the pid itself.
+    `expected_identity` is Windows-only (GetProcessTimes identity recorded at
+    start) and is ignored on POSIX."""
     if IS_WINDOWS:
-        return _win_kill_tree(root_pid, grace, job_name)
+        return _win_kill_tree(root_pid, grace, job_name, expected_identity)
     # Do NOT early-return just because the leader pid is dead: killpg targets
     # the pgid, which persists while any group member lives even after the
     # leader exits, so a dead leader can still front a live group we must sweep.
@@ -1467,6 +1674,12 @@ def supervise(job_dir: str, argv, result_path, conf: dict, ack_fd: int) -> None:
             "worker_pid": proc.pid,
         }
         if IS_WINDOWS:
+            sup_ident = _win_process_identity(os.getpid())
+            worker_ident = _win_process_identity(proc.pid)
+            if sup_ident:
+                pid_doc["supervisor_identity"] = sup_ident
+            if worker_ident:
+                pid_doc["worker_identity"] = worker_ident
             # Assign while still suspended, then resume. Record the job only
             # once the worker is actually a member, so a later reap never trusts
             # a name that owns nothing. If assignment fails (job creation denied,
@@ -1929,6 +2142,42 @@ def _emit_bytes(data: bytes) -> None:
         sys.stdout.write(data.decode("utf-8", "replace"))
 
 
+def _report_absent_artifact(target: str, args) -> int:
+    """An absent --path artifact is an outcome, not a read error: a peer that
+    skipped its gate exits 0 and writes nothing, so the file is legitimately
+    missing on the most common fold-in path. Name that outcome, and when the
+    caller also passed the job id, name the job's state -- otherwise "still
+    running" and "ran, produced nothing" arrive as one errno the caller cannot
+    act on. Each outcome keeps the exit code the job-result contract already
+    assigns it, so a trust or lookup failure never reads as the routine skip:
+    2 running, 4 ownership, 1 unknown job, 3 settled with no artifact."""
+    sys.stderr.write(f"peer-job-runner: no artifact at {target}\n")
+    if not args.job:
+        return 3
+    try:
+        job_dir = resolve_job_dir(args.job, args.skill)
+    except RunnerError as exc:
+        sys.stderr.write(f"peer-job-runner: {exc}\n")
+        return 1
+    state = job_state(job_dir)
+    if state == "unreadable":
+        # Do not read `reason` here: job_dir already failed its owner check, and
+        # O_NOFOLLOW guards only the final component, so a swapped directory
+        # could redirect that read.
+        sys.stderr.write(
+            f"peer-job-runner: job state unreadable (ownership or corruption): {job_dir}\n"
+        )
+        return 4
+    if state == "running":
+        sys.stderr.write(f"peer-job-runner: job {args.job} is still running\n")
+        return 2
+    reason = job_reason(job_dir)
+    sys.stderr.write(
+        f"peer-job-runner: job {args.job}: {state}" + (f" ({reason})" if reason else "") + "\n"
+    )
+    return 3
+
+
 def cmd_result(args) -> int:
     if not getattr(args, "path", None) and not args.job:
         sys.stderr.write("peer-job-runner: result needs a job id or --path FILE\n")
@@ -1938,14 +2187,21 @@ def cmd_result(args) -> int:
         # bounded read as job results. Exists because fold-in filenames can embed
         # values unknown at start time (so no --result-path was declared), yet the
         # consumer must never read a predictable /tmp path unchecked.
+        target = os.path.abspath(args.path)
         try:
-            data = read_owned(os.path.abspath(args.path), cfg()["result_max"])
+            data = read_owned(target, cfg()["result_max"])
         except Unreadable as exc:
             sys.stderr.write(f"peer-job-runner: unreadable: {exc}\n")
             return 4
+        except FileNotFoundError:
+            return _report_absent_artifact(target, args)
         except OSError as exc:
-            sys.stderr.write(f"peer-job-runner: file missing or unreadable: {exc}\n")
-            return 3
+            # Only a genuine ENOENT is "the peer produced nothing". Every other
+            # read failure means the path is there but was refused -- a planted
+            # symlink rejected by O_NOFOLLOW is the case this guard exists for --
+            # so it takes the trust-failure code, never the routine one.
+            sys.stderr.write(f"peer-job-runner: refused to read {target}: {exc}\n")
+            return 4
         _emit_bytes(data)
         return 0
     job_dir = resolve_job_dir(args.job, args.skill)
@@ -2002,15 +2258,28 @@ def cmd_reap(args) -> int:
         pid_doc = json.loads(read_owned(os.path.join(job_dir, "pid"), META_READ_CAP))
     except (Unreadable, OSError, ValueError):
         pid_doc = None
-    sup_pid = pid_doc.get("supervisor_pid") if isinstance(pid_doc, dict) else None
-    sup_pgid = pid_doc.get("supervisor_pgid") if isinstance(pid_doc, dict) else None
-    worker_pid = pid_doc.get("worker_pid") if isinstance(pid_doc, dict) else None
+    if not isinstance(pid_doc, dict):
+        pid_doc = {}
+    sup_pid = pid_doc.get("supervisor_pid")
+    sup_pgid = pid_doc.get("supervisor_pgid")
+    worker_pid = pid_doc.get("worker_pid")
     # Windows-only: the worker tree's job object. Named precisely so this
     # process -- which never held the supervisor's handle -- can reopen and
     # terminate the tree even after the worker leader has exited.
-    job_name = pid_doc.get("job_name") if isinstance(pid_doc, dict) else None
+    job_name = pid_doc.get("job_name")
+    worker_identity = pid_doc.get("worker_identity")
+    supervisor_identity = pid_doc.get("supervisor_identity")
 
-    if isinstance(sup_pid, int) and _pid_alive(sup_pid):
+    supervisor_ours = (
+        isinstance(sup_pid, int)
+        and not (IS_WINDOWS and sup_pid == os.getpid())
+        and _pid_alive(sup_pid)
+        and (
+            not IS_WINDOWS
+            or _win_process_identity_matches(sup_pid, supervisor_identity)
+        )
+    )
+    if supervisor_ours:
         # The supervisor owns TERM-grace-KILL and the terminal classification.
         # POSIX signals it (SIGTERM to the group or pid); Windows drops the
         # `.reap` marker the supervisor's loop polls for.
@@ -2049,7 +2318,7 @@ def cmd_reap(args) -> int:
     worker_leader_alive = False
     if isinstance(worker_pid, int):
         worker_leader_alive = kill_tree(
-            worker_pid, min(conf["grace"], 1.0), job_name)
+            worker_pid, min(conf["grace"], 1.0), job_name, worker_identity)
     # A worker can publish its declared result and exit before this fallback runs
     # (e.g. the supervisor died mid-run, then the worker completed cleanly). Honor
     # that result instead of discarding it as died-without-result: read the
@@ -2141,7 +2410,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_result.add_argument(
         "--path",
         default=None,
-        help="ownership-checked bounded read of this file instead of a job's declared result",
+        help=(
+            "ownership-checked bounded read of this file instead of a job's "
+            "declared result; pass the job id too so an absent file reports "
+            "that job's state"
+        ),
     )
 
     p_reap = sub.add_parser(

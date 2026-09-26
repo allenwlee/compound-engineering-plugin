@@ -9,39 +9,26 @@ format-specific references (`markdown-rendering.md`, `html-rendering.md`).
 A great plan enables three audiences to act:
 
 - **The implementing agent** (`ce-work` or a human) starts from an informed
-  baseline — load-bearing decisions are named, research breadcrumbs orient
+  baseline — the decisions everything else rests on are named, research breadcrumbs orient
   their own investigation, unit boundaries are clear. The plan gives the
   implementer a starting point, not a substitute for their own investigation.
-- **The reviewer** identifies the load-bearing decisions and the boundaries
+- **The reviewer** identifies the decisions everything else rests on and the boundaries
   of what's being changed in one pass.
 - **The future reader** (anyone returning months later) traces why the work
   was done, what shaped it, and where the artifacts live.
 
-Sections earn their place by serving one of these audiences. Omit padding.
+A section belongs only when it serves one of these audiences. Omit padding.
 
 ## Unified plan artifact contract
 
 `ce-plan` writes the canonical compound-engineering plan artifact. The same
 artifact may begin as a requirements-only skeleton from `ce-brainstorm` and
 later be enriched by `ce-plan`; it is still one plan file moving through
-readiness states, not a requirements doc plus a separate implementation doc.
+planning stages, not a requirements doc plus a separate implementation doc.
 
 When the artifact is meant to be consumed by implementation agents, use:
 
 - **`artifact_contract: ce-unified-plan/v1`** — declares this contract.
-- **`artifact_readiness`** — document completeness, not work progress. Valid
-  values are:
-  - `requirements-only` — Product Contract exists; planning sections are not
-    complete and the artifact is not executable.
-  - `implementation-ready` — Product Contract, Planning Contract,
-    Implementation Units, Verification Contract, and Definition of Done are
-    complete enough for `ce-work`, `/goal`, or an equivalent executor, **and no
-    launch-blocking open question remains**. A plan that is otherwise complete
-    but still has a blocking product/architecture question stays
-    `requirements-only`, so the next step it routes to is blocker resolution /
-    planning, not implementation. Deferred (non-blocking) questions
-    do not hold readiness back — mark each open question as blocking or deferred
-    so this distinction is explicit.
 - **`product_contract_source`** — where the Product Contract came from:
   `ce-brainstorm`, `ce-plan-bootstrap`, `legacy-requirements`, or another
   explicit source string when a repo has a specialized producer.
@@ -49,18 +36,11 @@ When the artifact is meant to be consumed by implementation agents, use:
   non-code deliverables. Absence remains legacy-compatible and means `code`
   only for older plans without `artifact_contract`.
 
-Do **not** use progress-like readiness values such as `active`,
-`in_progress`, `completed`, or `done`. Readiness answers "can the artifact be
-executed?", not "has execution happened?" Plans still carry no `status` field
-and no mutable execution lifecycle.
+Determine whether a plan can be executed from its contents. The Product Contract, Planning Contract, Implementation Units, Verification Contract, and Definition of Done must give the executor enough direction, with no launch-blocking question remaining. Mark open questions as blocking or deferred; deferred implementation details do not prevent work. A Product Contract without sufficient planning needs enrichment.
 
-Do **not** use `artifact_readiness: approach-plan`. Approach-plans,
-answer-seeking outputs, and universal-planning outputs are outside this
-software implementation artifact contract unless they include the full Product
-Contract, Planning Contract, Implementation Units, Verification Contract, and
-Definition of Done required for software execution. Route those artifacts by
-their own shape or by `execution: knowledge-work`, not by adding a third
-unified readiness value.
+Do not write a readiness or execution-status field. When updating an older artifact, remove `artifact_readiness` from its frontmatter or visible HTML metadata. An old readiness label does not establish completeness or override a blocker. Plans carry no `status` field and no mutable execution lifecycle.
+
+Approach-plans, answer-seeking outputs, and universal-planning outputs remain outside this software implementation contract unless they contain the full contract above. Route non-code deliverables by their contents and `execution: knowledge-work`.
 
 ## Section ID Registry
 
@@ -70,7 +50,7 @@ skills grep or anchor-scan for these names before reading large bodies.
 
 | Logical section | Markdown heading | HTML id | Reader use |
 |---|---|---|---|
-| Goal Capsule | `## Goal Capsule` | `goal-capsule` | Objective, authority hierarchy, and stop conditions |
+| Goal Capsule | `## Goal Capsule` | `goal-capsule` | Objective (outcome), Means (chosen approach), authority hierarchy, and stop conditions |
 | Product Contract | `## Product Contract` | `product-contract` | Requirements, actors, flows, acceptance examples, product scope |
 | Product Requirements | `### Requirements` under Product Contract | `product-requirements` | Requirement extraction for review and implementation trace |
 | Planning Contract | `## Planning Contract` | `planning-contract` | KTDs, technical design, assumptions, sequencing |
@@ -110,64 +90,50 @@ the sections the task needs — e.g. Goal Capsule, the active U-ID plus its cite
 R/F/AE/KTD, Verification Contract, and Definition of Done. Read the Appendix or
 unrelated units only when a section you are already reading cites them.
 
-## Decide whether a plan doc is warranted at all
+## Whether a plan file is warranted
 
-Not every invocation of `ce-plan` should produce a plan document. For
-genuinely atomic work, the doc is ceremony — the implementer (whether
-`ce-work` or a human) can act directly without IDed units, KTDs, or
-Requirements as a checklist.
-
-**Bias toward producing a plan.** The risk asymmetry favors writing one:
-a thin plan doc for small work is mild ceremony, but skipping a plan when
-one was warranted costs the implementer real time (reinvented decisions,
-lost unit boundaries, no IDed requirements to verify against). When unsure,
-write the plan.
-
-**Skip implementation-ready plan creation only when ALL of these hold:**
-
-- The work is **atomic** — fits in one commit, no meaningful unit boundaries
-  to break out independently.
-- There are **no design choices that constrain implementation** — no
-  Key Technical Decisions worth recording. If the work needs the implementer
-  to make a choice between two approaches, those approaches are KTDs and
-  a plan is warranted.
-- There are **no scope boundaries worth pinning** in writing — the work
-  scope is self-evident from the user's request.
-- **No upstream artifact** (a brainstorm with R-IDs, an incident report,
-  a deferred-follow-up item from a prior plan) needs traceability through
-  this plan.
-
-**Stress test the "looks atomic" case.** Many requests look atomic at first
-glance but hide design decisions:
-
-- *"Add caching to this endpoint"* — sounds atomic, but TTL, invalidation,
-  cache key shape, and backend selection are all KTDs. Write the plan.
-- *"Migrate from package A to package B"* — sounds mechanical, but
-  semantic differences between the packages create migration KTDs. Write
-  the plan.
-- *"Add rate limiting"* — sounds small, but algorithm, scope, and
-  configurability are all KTDs. Write the plan.
-
-vs. genuine skip cases:
-
-- *"Fix typo in README line 47"* — atomic, no KTDs, skip the plan.
-- *"Rename `oldFn` to `newFn` across the repo"* — mechanical, no design
-  choices, skip the plan.
-- *"Bump dependency X to v2.3.1"* — mechanical, skip the plan (unless the
-  bump introduces breaking changes that warrant unit-by-unit migration).
-
-When skipping the plan doc, the work proceeds directly to `ce-work` or to
-implementation, and any decisions made along the way land in the commit
-message or `<root>/solutions/` if they're worth carrying forward.
+SKILL.md's Output Contract gate decides this at intake, before any research: Direct and Chat brief results stay in chat (`references/output-contracts.md`); a Durable run writes the file this reference describes.
 
 ## Implementation-ready hard floor
 
 When an implementation-ready software plan is warranted, these sections are
 present. They carry the contracts downstream consumers depend on.
 
-- **Goal Capsule** — objective, authority hierarchy, stop conditions, execution
-  profile, and tail ownership. This is the fastest way for an executor to
-  avoid drifting from the plan.
+- **Goal Capsule** — objective, means (only when an approach is fixed),
+  authority hierarchy, stop conditions, execution profile, and who
+  finishes and ships the work. This is the fastest way for an executor to avoid drifting from
+  the plan. A reader who has not read the rest of the plan must be able to
+  hold the Objective as the goal. Remaining-true constraints live on their
+  owning R-IDs (the R-IDs that state them), not as extra Objective clauses — user-checkable is not a
+  license to pack them onto the Objective. An Objective that is only
+  understandable after later sections is not yet the Objective, even when a
+  user could check the outcome and a different implementation would still
+  serve it. The **Objective** is always the outcome: what is true for users
+  or operators afterwards, phrased so it would still read as the goal under
+  a different implementation. It sits outside the component being changed,
+  which is a question of who can check it rather than of which nouns it
+  uses: an outcome someone outside that component can verify without knowing
+  its internals is an Objective even when that component is what changed,
+  and one only its internals can settle is not the Objective however
+  outcome-shaped its wording; the registry above decides where it does
+  belong. The usual failure is an objective about the component's own
+  execution — the wall-clock it no longer holds, the runtime it no longer
+  consumes, what stays isolated inside it — which only its internals settle.
+  Infrastructure and refactor work has such an objective too: the reason
+  that component's behavior mattered to someone. The chosen approach is the
+  **Means**, its own line whenever the request or the plan has fixed one —
+  never invented for outcome-only work. It is a linked projection under the
+  one-owner rule below: one line naming the approach and citing the KTD or
+  Key Decision that owns it (`Means: … (KTD2)`), never a restatement of that
+  owner's mechanism. Test: if the implementation changed, would the
+  Objective still be the goal, and could a reader who does not know the
+  changed component's internals tell whether it was met? No to the first
+  makes it a Means. No to the second means it is stated at the component's
+  level, and the Objective is whatever depended on that component. When a
+  request supplies only its approach ("move X out of A into B"), that is the
+  Means; the Objective is the outcome it serves, derived from the request's
+  motivation, the project's stated problem, or asked for — never the approach
+  restated.
 - **Product Contract** — product scope and behavior. Contains Summary, Problem
   Frame, Requirements with stable R-IDs, and any material Actors, Flows,
   Acceptance Examples, Success Criteria, Scope Boundaries, Dependencies,
@@ -215,10 +181,10 @@ The first five entries below carry the Product Contract's product framing —
 what is being built and why. Later entries mix Product Contract subsections
 (Scope Boundaries, Open Questions, Acceptance Examples, Sources) with
 Planning Contract ones; the hard floor above remains authoritative for which
-section sits under which contract. Problem Frame is unconditional; the other four fire on their own tests. A plan
+section sits under which contract. Problem Frame is unconditional; each of the other four is included when its own test says so. A plan
 that skips all four conditional framing entries has usually inherited its
 framing from an upstream Product Contract — check before concluding none of
-them fire.
+them apply.
 
 - **Problem Frame** — the hard floor above contains it unconditionally, so
   this entry governs its depth, never whether to include it. Give it
@@ -250,7 +216,9 @@ them fire.
   latency under 200ms"), qualitative criteria ("the agent's output reads as
   one voice"), process / handoff quality ("ce-doc-review can act on this
   without follow-ups"). Skip when Requirements ARE the success criteria
-  (every R is "done when the R is true").
+  (every R is "done when the R is true"). Requirements that describe an
+  approach rather than an outcome are not success criteria; then include at
+  least one criterion that would show the Goal Capsule Objective was reached.
 
 - **Actors** — include when the work has multi-party behavior (multiple
   humans, agents, or systems meaningfully involved) that the units must
@@ -280,7 +248,7 @@ them fire.
   "Open Questions: none" section signals false uncertainty.
 
 - **System-Wide Impact** — include when the change affects cross-cutting
-  concerns (data lifecycles, auth boundaries, performance posture, cardinal
+  concerns (data lifecycles, auth boundaries, performance characteristics, cardinal
   rules, shared infrastructure, agent/tool parity, prompt context, shared
   workspaces). Skip for changes localized to one component where the impact is
   self-evident.
@@ -300,14 +268,21 @@ them fire.
   work is purely internal and uses existing operational scaffolding without
   modification.
 
-- **Sources / Research** — surface the research that orients the implementer
-  or justifies load-bearing choices. The test: *"if I were the implementer
+- **Sources / Research** — include the research that orients the implementer
+  or justifies the choices the plan rests on. The test: *"if I were the implementer
   reading this cold, would this breadcrumb help me make better choices?"*
-  Yes → surface (code locations like `services/convex/reports.ts:174-176`,
+  Yes → include (code locations like `services/convex/reports.ts:174-176`,
   external docs, RFCs, constraints, prior plans — the category is inclusive,
-  not enumerated). Process exhaust (reading the user's prompt, glancing at
-  obvious entry points, restating prose) → omit. Surface inline next to the
-  KTD or unit it justifies, or as a dedicated section — both shapes work.
+  not enumerated). A record of the planning process itself (reading the
+  user's prompt, glancing at obvious entry points, restating prose) → omit. Put it inline next to the
+  KTD or unit it justifies, or in a dedicated section — both shapes work.
+  A constraint adopted from a Compound Pack file is cited inline as
+  `(pack: <id>, <path within the pack>)` after the requirement, KTD, constraint,
+  or risk it shaped. The path is relative to the pack's own directory, so it
+  is stable for path- and git-sourced packs alike. Cite the pack text; do not
+  restate it. That marker is reserved for pack files; `<root>/solutions/`
+  learnings keep the ordinary path citation, so a reader can tell a
+  prescriptive pack rule from a retrospective learning.
 
 ## Agent agency
 
@@ -338,6 +313,8 @@ contradictions hide and the implementing agent loses the thread. A deep plan
 earns length through coverage (more units, more traced requirements, real
 risks), never through wordiness around that coverage.
 
+Write every kept section through the `ce-noslop` skill.
+
 Hold every kept section to these:
 
 - **Lead with the decision or outcome.** Put the conclusion first, then the
@@ -346,22 +323,13 @@ Hold every kept section to these:
   goal beneath its rationale. This does not override section roles — Summary
   stays proposal-only, Problem Frame stays motivation-only and never restates
   the remedy.
-- **Use an ASD-STE100 Simplified Technical English (STE)-inspired style for
-  technical plan content.** Write short, direct sentences. Keep one decision,
-  action, or condition per sentence, and use one consistent term for each
-  concept. Preserve exact identifiers, paths, commands, protocol names, and
-  domain terms. Shorten sentences, not content: preserve every distinct
-  requirement, qualification, and test scenario. A Summary is a handful of
-  sentences, not one sentence with five semicolons and four parentheticals. A
-  KTD's rationale is the load-bearing reason, not every reason.
+- **A Summary is a handful of sentences**, not one sentence with five
+  semicolons and four parentheticals. A KTD's rationale is the reason that
+  decided it, not every reason.
 - **A requirement or unit is one sentence of intent plus at most one
   qualifier.** When it would specify two outcomes ("either A or B, the
   implementer decides"), state the intent and send the fork to Open Questions —
   don't write both arms in full inside the item.
-- **Cut hedges and intensifiers.** "Critically", "deliberately", "explicitly",
-  "genuinely", "actually", "simply" carry nothing the implementer acts on.
-- **Prefer the verb to the nominalization.** "Demote the grid", not "the
-  demotion of the grid is the deliberate change in this plan".
 
 Precision is not padding: keep file paths, IDs, dates, domain terms,
 conditionals, and exact thresholds verbatim; when a concrete anchor is knowable
@@ -380,7 +348,7 @@ owning entry: product behavior on its R-ID; an implementation choice on its
 KTD. Every other layer cites the owning ID and adds only what is local to
 it — a unit's Approach carries unit-local deltas (files, sequencing,
 patterns), never a re-derivation of the protocol its cited Rs and KTDs own.
-Linked projections are sanctioned (an AE restating behavior under
+Linked projections are allowed (an AE restating behavior under
 `Covers R…`, a Flow citing the Rs it sequences). **Unlinked sibling
 restatement** — the same rule written out again in a KTD, Scope bullet, or
 Approach with no ID link — is the defect: each copy drifts independently.
@@ -396,9 +364,10 @@ multi-sentence summary of the cited document is restatement of an owner that
 lives outside the doc.
 
 **Named test, run before the plan is declared written:** could the implementer
-find a contradiction in each section in one pass? A sentence carrying more than
-one parenthetical, a sentence chaining more than two semicolons, an item
-specifying two outcomes, or a rule stated in full in more than one section
+find a contradiction in each section in one pass? Could a colleague who was
+not in the session say what this work is after the Objective alone? A sentence
+carrying more than one parenthetical, a sentence chaining more than two
+semicolons, an item specifying two outcomes, or a rule stated in full in more than one section
 fails the test — split it (a semicolon chain becomes a list), defer it, or
 replace the duplicate with its owning ID.
 
@@ -417,7 +386,7 @@ plan.
 - **`title`** — the plan's descriptive name with a ` - Plan` suffix
   (e.g., `Highlighter Tool - Plan`), matching the H1 (markdown) or document
   `<h1>` (HTML) so file metadata and visible heading don't drift. Stable
-  across readiness states (it is a plan at every stage). Do not put a
+  across planning stages (it is a plan at every stage). Do not put a
   conventional-commit prefix (`feat:`/`fix:`) in the title — the `type` field
   carries that classification.
 - **`type`** — conventional-commit-prefix-aligned classification (`feat`,
@@ -462,8 +431,8 @@ These apply regardless of rendering format.
 
 - **Stable IDs.** R-IDs (Requirements), U-IDs (Implementation Units),
   KTD-IDs (Key Technical Decisions, implementation-ready plans), A-IDs
-  (if Actors fire), F-IDs (if Flows fire), AE-IDs (if Acceptance Examples
-  fire). IDs are stable across plan revisions — never renumber to "clean
+  (if the plan has Actors), F-IDs (if it has Flows), AE-IDs (if it has
+  Acceptance Examples). IDs are stable across plan revisions — never renumber to "clean
   up gaps."
 - **Plain prefix.** `R1.`, `U1.`, `KTD1.` as bullet prefixes. Do not bold;
   the prefix is visually distinctive on its own.
@@ -474,7 +443,7 @@ These apply regardless of rendering format.
   in legacy plans stay as they are — readable by label, no mass renumbering.
 - **Repo-relative paths.** Always. Never absolute paths in plan content;
   they break portability across machines, worktrees, teammates.
-- **No process exhaust.** No "captured at Phase X" notes, no `## Next Steps`
+- **No record of the planning process.** No "captured at Phase X" notes, no `## Next Steps`
   pointing to the next skill, no italic provenance lines. Engineering process
   metadata belongs in commit messages and tool output, not the artifact.
 - **Session-settled annotations on KTDs.** A Key Technical Decision that
@@ -493,7 +462,7 @@ These apply regardless of rendering format.
   readable without the conversation — and lives inline on the entry: no
   sidecar files, no frontmatter registry, no numeric weights, no lifecycle
   field. Like a `(see origin: <path>)` citation, it is decision provenance,
-  not process exhaust — review passes must not strip it. A consumer that
+  not a record of the planning process — review passes must not strip it. A consumer that
   does not recognize the annotation treats the entry as a normal KTD.
 - **Group Requirements by concern when they span distinct logical areas.**
   The trigger is distinct concerns, not item count — even four requirements

@@ -9,7 +9,6 @@ import re
 import stat
 
 from unit_workspace_state import *
-from unit_workspace_ignored import require_ignored_snapshot_capability
 
 
 def _valid_retry_commit_id(value: object) -> bool:
@@ -95,7 +94,6 @@ def cmd_prepare(args) -> tuple[str, dict]:
             raise Operational("BLOCKED", "canonical HEAD does not equal requested unit base")
         if status_paths(repo):
             raise Operational("BLOCKED", "canonical checkout is dirty; external workspace unavailable")
-        require_ignored_snapshot_capability(repo)
         existing = doc["units"].get(uid)
         unit_root = os.path.join(run_dir(args.run_id), "units", uid)
         workspace = os.path.join(unit_root, "workspace")
@@ -329,7 +327,7 @@ def process_evidence(job_dir: str) -> dict:
 
 HOST_RECEIPT_FIELDS = (
     "requested_route", "actual_route", "target", "harness", "intermediaries",
-    "model_requested", "model_actual", "model_receipt_status", "activity_posture",
+    "model_requested", "model_actual", "model_receipt_status", "effort_requested", "activity_posture",
     "restriction_posture", "failure_reason", "raw_log", "packet_digest",
 )
 MAX_RESULT_BYTES = 5 * 1024 * 1024
@@ -492,6 +490,7 @@ def terminal_receipt(
         "harness": authorization["harness"],
         "intermediaries": authorization["intermediaries"],
         "model_requested": authorization["model_requested"],
+        "effort_requested": authorization.get("effort_requested"),
         "restriction_posture": authorization["restriction_posture"],
         "packet_digest": unit["packet_digest"],
     }

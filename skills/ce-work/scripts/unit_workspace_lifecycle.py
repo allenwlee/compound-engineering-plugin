@@ -52,14 +52,7 @@ def unfinished_run(doc: dict, canonical_head: str) -> bool:
         fallback = attempt.get("fallback", {})
         claim = fallback.get("claimed") if isinstance(fallback, dict) else None
         completion = fallback.get("completed") if isinstance(fallback, dict) else None
-        claim_valid = isinstance(claim, dict) and (
-            claim.get("mode") == "prefer"
-            or (
-                claim.get("mode") == "require"
-                and claim.get("caller_mode") == "interactive"
-                and claim.get("confirmed_native") is True
-            )
-        )
+        claim_valid = isinstance(claim, dict) and claim.get("mode") in {"prefer", "require"}
         if not (
             claim_valid
             and isinstance(completion, dict)
@@ -100,10 +93,19 @@ def unfinished_run(doc: dict, canonical_head: str) -> bool:
 def discover_resume_run(repo: str, plan_digest: str) -> tuple[str, list[dict]]:
     if not re.fullmatch(r"[0-9a-f]{64}", plan_digest):
         raise Operational("REFUSED", "plan digest must be a lowercase SHA-256 hex value")
-    root = ensure_root()
+    ensure_root()
     info = repo_info(repo)
     candidates: list[dict] = []
-    for entry in sorted(os.scandir(root), key=lambda row: row.name):
+    # A run recorded under the other candidate root (sandboxed vs unsandboxed
+    # session) must still be discoverable; scan every candidate that exists.
+    # Read-only: repairing a root this session cannot write (a leftover /tmp
+    # tree under the sandbox) would abort discovery before the writable one.
+    entries = []
+    for root in candidate_runs_roots():
+        if not os.path.isdir(root) or os.path.islink(root):
+            continue
+        entries.extend(os.scandir(root))
+    for entry in sorted(entries, key=lambda row: row.path):
         if entry.name == ".locks":
             continue
         if not entry.is_dir(follow_symlinks=False):
@@ -626,19 +628,13 @@ def cmd_claim_fallback(args) -> tuple[str, dict]:
             ):
                 raise Operational("BLOCKED", "native fallback must start from the latest recorded wave head")
         mode = doc.get("binding", {}).get("mode")
-        if mode == "require":
-            if args.caller_mode == "headless":
-                raise Operational("BLOCKED", "required external route terminated; headless callers cannot choose native fallback", {"unit_id": args.unit_id, "reason": reason})
-            if not args.confirm_native:
-                raise Operational("CHOICE_REQUIRED", "required external route terminated; ask whether to continue natively", {"unit_id": args.unit_id, "reason": reason})
-        elif mode != "prefer":
+        if mode not in {"prefer", "require"}:
             raise Operational("REFUSED", f"binding mode {mode!r} does not authorize native fallback")
         claim = {
             "at": now_iso(),
             "reason": reason,
             "caller_mode": args.caller_mode,
             "mode": mode,
-            "confirmed_native": bool(args.confirm_native),
             "canonical_head": claim_snapshot["head"],
         }
         fallback.update({"eligible": False, "reason": reason, "claimed": claim})
@@ -717,10 +713,6 @@ def cmd_complete_fallback(args) -> tuple[str, dict]:
         claim_mode = claim.get("mode")
         if claim_mode not in {"prefer", "require"}:
             raise Operational("REFUSED", "native fallback completion requires an authorized prefer or require claim")
-        if claim_mode == "require" and not (
-            claim.get("caller_mode") == "interactive" and claim.get("confirmed_native") is True
-        ):
-            raise Operational("REFUSED", "require-mode native fallback completion requires explicit interactive confirmation")
         if doc.get("integration_lock") is not None:
             raise Operational("REFUSED", "release the integration lock before completing native fallback")
 
