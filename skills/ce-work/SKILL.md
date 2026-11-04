@@ -33,7 +33,7 @@ When triage selects Return-to-Caller Mode, read `references/return-to-caller.md`
 
 1. **Establish the workspace.** Before moving branches, editing, dispatching, or committing, read `references/workspace-setup.md`. It decides the writable checkout, plan clarification, branch placement, the pre-work inventory, already-dirty files, and task setup. Never write without a writable canonical checkout, and never write on the real default branch unless the user explicitly directed that in this session.
 
-   **Do not commit or publish anything the user did not offer.** When a unit needs a file that was already dirty, standalone mode asks once whether to include or exclude that file. Return-to-Caller Mode neither asks nor edits it; it returns blocked, naming the collision and how to recover.
+   **Do not commit or publish anything the user did not offer.** An already-dirty file that the plan or the request names as existing work to build on is offered: edit and commit it like any work file. When a unit needs any other already-dirty file, standalone mode asks once whether to include or exclude that file. Return-to-Caller Mode neither asks nor edits it; it returns blocked, naming the collision and how to recover.
 
 2. **Resolve the engine, then strategy.** After bounded plan intake and task derivation, but before selecting a unit for execution, writing, dispatching, or committing, read `references/execution-engines.md` and complete its route selection. It applies with or without a typed binding; native execution is eligible only when that reference selects it or exhausts an allowed fallback. The engine choice never changes which reference governs how the run ends.
 
